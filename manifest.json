@@ -3,23 +3,35 @@
   "name": "SmsForwarderForChrome",
   "version": "1.0.0",
   "description": "通过SmsForwarder收发短信的Chrome插件",
-  "permissions": ["storage", "activeTab", "contextMenus"],
-  "host_permissions": ["https://*/*"],
   "action": {
-    "default_popup": "popup.html",
     "default_icon": {
-      "16": "images/icon.svg",
-      "48": "images/icon.svg",
-      "128": "images/icon.svg"
+      "16": "images/icon16.png",
+      "48": "images/icon48.png",
+      "128": "images/icon128.png"
     }
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
   },
   "background": {
     "service_worker": "background.js"
   },
   "options_page": "options.html",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "contextMenus",
+    "notifications",
+    "scripting",
+    "clipboardWrite",
+    "sidePanel"
+  ],
+  "host_permissions": [
+    "https://*/*"
+  ],
   "icons": {
-    "16": "images/icon16.svg",
-    "48": "images/icon48.svg",
-    "128": "images/icon128.svg"
+    "16": "images/icon16.png",
+    "48": "images/icon48.png",
+    "128": "images/icon128.png"
   }
 }

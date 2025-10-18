@@ -22,6 +22,9 @@ document.addEventListener('DOMContentLoaded', function() {
   let currentSmsType = querySmsTypeSelect.value;
   let currentKeyword = '';
   
+  // 新增：默认短信类型常量，用于本地数据的类型兼容
+  const DEFAULT_SMS_TYPE = 1;
+  
   // 页面加载时自动查询短信 - 默认查询接收的短信，关键字为空
   querySmsMessages(querySmsTypeSelect.value, '', true);
   
@@ -43,6 +46,21 @@ document.addEventListener('DOMContentLoaded', function() {
       resetPagination();
       querySmsMessages(currentSmsType, currentKeyword, true);
     }, 500); // 500毫秒的防抖延迟
+  });
+  
+  // 监听后台轮询的更新消息，收到后刷新当前查询列表
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message && message.type === 'smsListUpdated') {
+      try {
+        // 保持用户当前筛选条件，重置分页并刷新
+        resetPagination();
+        currentSmsType = querySmsTypeSelect.value;
+        currentKeyword = querySmsKeywordInput.value.trim();
+        querySmsMessages(currentSmsType, currentKeyword, true);
+      } catch (e) {
+        console.error('刷新短信列表失败:', e);
+      }
+    }
   });
   
   // 监听滚动事件，实现滚动加载更多
@@ -392,7 +410,83 @@ document.addEventListener('DOMContentLoaded', function() {
       }
     }
     
-    // 获取设置
+    // 新增：本地优先渲染（第一页/重置）
+    let didRenderFromLocal = false;
+    if (isReset || currentPage === 1) {
+      try {
+        const localItems = await new Promise((resolve) => {
+          chrome.storage.local.get(['polledSmsList'], resolve);
+        });
+        const localListRaw = Array.isArray(localItems.polledSmsList) ? localItems.polledSmsList : [];
+        // 按时间降序排序
+        const localList = localListRaw.slice().sort((a, b) => {
+          const ta = a.timestamp || a.date || a.time || 0;
+          const tb = b.timestamp || b.date || b.time || 0;
+          return tb - ta;
+        });
+        // 过滤类型与关键字
+        const filteredLocal = localList.filter(sms => {
+          const tRaw = sms.type;
+          const t = typeof tRaw === 'string' ? parseInt(tRaw) : (typeof tRaw === 'number' ? tRaw : DEFAULT_SMS_TYPE);
+          const matchesType = parseInt(smsType) === t;
+          if (!matchesType) return false;
+          if (!keyword) return true;
+          const text = [sms.content, sms.name, sms.contact, sms.number, sms.from, sms.to]
+            .filter(Boolean)
+            .join(' ');
+          return text.includes(keyword);
+        });
+        if (filteredLocal.length > 0) {
+          let resultHTML = '<table class="sms-table">';
+          resultHTML += '<thead><tr><th>联系人/号码</th><th>时间</th><th>类型</th></tr></thead>';
+          resultHTML += '<tbody>';
+          filteredLocal.forEach(sms => {
+            const date = new Date(sms.timestamp || sms.date || sms.time || 0);
+            const formattedDate = `${date.getFullYear()}-${(date.getMonth()+1).toString().padStart(2, '0')}-${date.getDate().toString().padStart(2, '0')} ${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
+            const tRaw = sms.type;
+            const t = typeof tRaw === 'string' ? parseInt(tRaw) : (typeof tRaw === 'number' ? tRaw : DEFAULT_SMS_TYPE);
+            const smsTypeText = (t === 1) ? '接收' : '发送';
+            const contact = sms.name || sms.contact || '未知';
+            const number = sms.number || sms.from || sms.to || '';
+            resultHTML += `<tr class="sms-row">`;
+            resultHTML += `<td class="sms-number">${contact}${number ? '<br>' : ''}${number}</td>`;
+            resultHTML += `<td class="sms-meta">${formattedDate}</td>`;
+            resultHTML += `<td class="sms-meta">${smsTypeText}</td>`;
+            resultHTML += `</tr>`;
+            resultHTML += `<tr><td colspan="3"><div class="sms-content">${sms.content || ''}</div></td></tr>`;
+          });
+          resultHTML += '</tbody></table>';
+          smsQueryResultDiv.innerHTML = resultHTML;
+          
+          // 允许向下滚动以从服务端加载更多历史
+          hasMoreData = true;
+          const loadMoreTip = document.createElement('div');
+          loadMoreTip.className = 'load-more-tip';
+          loadMoreTip.textContent = '向下滚动加载更多';
+          loadMoreTip.style.textAlign = 'center';
+          loadMoreTip.style.padding = '10px';
+          loadMoreTip.style.color = '#666';
+          loadMoreTip.style.fontSize = '12px';
+          smsQueryResultDiv.appendChild(loadMoreTip);
+          
+          showStatus('', '');
+          didRenderFromLocal = true;
+        }
+      } catch (e) {
+        console.error('读取本地短信失败:', e);
+      }
+    }
+    if (didRenderFromLocal) {
+      // 如果使用了本地数据，跳过首屏接口请求
+      const loadingMoreElement = document.getElementById('loadingMore');
+      if (loadingMoreElement) {
+        loadingMoreElement.remove();
+      }
+      isLoading = false;
+      return;
+    }
+    
+    // 获取设置（服务端回退）
     try {
       const items = await new Promise((resolve) => {
         chrome.storage.sync.get(['serverUrl', 'secret'], resolve);
@@ -444,7 +538,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
         
         const data = await response.json();
-        
+        console.log('查询短信列表响应:', data);
         // 移除加载更多的提示
         const loadingMoreElement = document.getElementById('loadingMore');
         if (loadingMoreElement) {
