@@ -1,12 +1,13 @@
+importScripts('shared/crypto.js', 'shared/api.js', 'shared/storage.js', 'shared/bus.js');
 // 插件安装或更新时触发
 chrome.runtime.onInstalled.addListener(function() {
   // 初始化默认设置
-  chrome.storage.sync.get(['serverUrl', 'secret'], function(items) {
+  SharedStorage.getSync(['serverUrl', 'secret']).then((items) => {
     if (!items.serverUrl) {
-      chrome.storage.sync.set({serverUrl: ''});
+      SharedStorage.setSync({ serverUrl: '' });
     }
     if (!items.secret) {
-      chrome.storage.sync.set({secret: ''});
+      SharedStorage.setSync({ secret: '' });
     }
   });
   // 创建右键菜单
@@ -31,7 +32,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
       });
     }
     // 异步保存选中文本（不阻塞侧边栏打开）
-    chrome.storage.local.set({ selectedText: info.selectionText });
+    SharedStorage.setLocal({ selectedText: info.selectionText });
   }
 });
 
@@ -83,48 +84,25 @@ chrome.action.onClicked.addListener((tab) => {
   async function pollLatestSms() {
     try {
       // 拉取配置
-      const cfg = await new Promise((resolve) => {
-        chrome.storage.sync.get(['serverUrl', 'secret'], resolve);
-      });
+      const cfg = await SharedStorage.getSync(['serverUrl', 'secret']);
 
       if (!cfg.serverUrl || !cfg.secret) {
         logError('[Polling] serverUrl/secret 未配置，跳过本轮');
         return; // 未配置则直接返回，不启动重试
       }
 
-      // 生成签名
-      const timestamp = Date.now().toString();
-      const sign = await generateSign(cfg.secret, timestamp);
+      const resp = await SharedApi.signedPost(
+        cfg.serverUrl,
+        '/sms/query',
+        cfg.secret,
+        { type: DEFAULT_SMS_TYPE, page_num: 1, page_size: 20 }
+      );
 
-      // 构建请求
-      const url = cfg.serverUrl + '/sms/query';
-      const requestData = {
-        data: {
-          type: DEFAULT_SMS_TYPE,
-          page_num: 1,
-          page_size: 20
-        },
-        timestamp: timestamp,
-        sign: sign
-      };
-
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
-        },
-        body: JSON.stringify(requestData),
-        signal: AbortSignal.timeout(10000), // 10秒超时
-        mode: 'cors',
-        credentials: 'same-origin'
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}`);
       }
 
-      const data = await response.json();
+      const data = await resp.json();
       if (data.code !== 200 && data.code !== 0) {
         throw new Error(`API code: ${data.code}, msg: ${data.msg || '未知错误'}`);
       }
@@ -162,9 +140,7 @@ chrome.action.onClicked.addListener((tab) => {
 
   async function mergeAndStoreSmsList(newList) {
     // 读取现有列表
-    const local = await new Promise((resolve) => {
-      chrome.storage.local.get(['polledSmsList'], resolve);
-    });
+    const local = await SharedStorage.getLocal(['polledSmsList']);
     const existing = Array.isArray(local.polledSmsList) ? local.polledSmsList : [];
 
     // 先记录现有键集合，用于检测新增短信（不考虑顺序变化）
@@ -210,9 +186,7 @@ chrome.action.onClicked.addListener((tab) => {
       }
 
       // 写入本地存储
-      await new Promise((resolve) => {
-        chrome.storage.local.set({ polledSmsList: merged }, resolve);
-      });
+      await SharedStorage.setLocal({ polledSmsList: merged });
     }
 
     return addedCount > 0;
@@ -238,7 +212,7 @@ chrome.action.onClicked.addListener((tab) => {
 
   function broadcastSmsUpdate() {
     try {
-      chrome.runtime.sendMessage({ type: 'smsListUpdated' });
+      SharedBus.send(SharedBus.Types.SMS_LIST_UPDATED);
     } catch (e) {
       // 在某些上下文下可能没有监听者，这里仅记录
       logError(`[Broadcast] 通知失败: ${e && e.message ? e.message : String(e)}`);
@@ -286,44 +260,19 @@ chrome.action.onClicked.addListener((tab) => {
     console.error(message);
     try {
       const now = new Date().toISOString();
-      const { pollErrorLogs } = await new Promise((resolve) => {
-        chrome.storage.local.get(['pollErrorLogs'], resolve);
-      });
+      const { pollErrorLogs } = await SharedStorage.getLocal(['pollErrorLogs']);
       const logs = Array.isArray(pollErrorLogs) ? pollErrorLogs : [];
       logs.push({ time: now, message });
       // 保持最多50条错误日志
       const trimmed = logs.length > 50 ? logs.slice(logs.length - 50) : logs;
-      await new Promise((resolve) => {
-        chrome.storage.local.set({ pollErrorLogs: trimmed }, resolve);
-      });
+      await SharedStorage.setLocal({ pollErrorLogs: trimmed });
     } catch (_) {
       // 忽略日志写入错误
     }
   }
 
-  // --------------------------- 签名模块 ---------------------------
-  async function generateSign(secret, timestamp) {
-    // 根据规范，签名字符串为 timestamp + "\n" + secret
-    return await hmacSHA256(`${timestamp}\n${secret}`, secret);
-  }
-
-  async function hmacSHA256(message, key) {
-    const encoder = new TextEncoder();
-    const keyData = encoder.encode(key);
-    const messageData = encoder.encode(message);
-
-    const cryptoKey = await crypto.subtle.importKey(
-      'raw',
-      keyData,
-      { name: 'HMAC', hash: 'SHA-256' },
-      false,
-      ['sign']
-    );
-
-    const signature = await crypto.subtle.sign('HMAC', cryptoKey, messageData);
-    const base64Signature = btoa(String.fromCharCode(...new Uint8Array(signature)));
-    return encodeURIComponent(base64Signature);
-  }
+  // --------------------------- 签名模块（使用 SharedCrypto） ---------------------------
+  // 本地签名逻辑已移除，统一使用 SharedCrypto.generateSign
 
   function signatureOfList(list) {
     try {
@@ -390,9 +339,7 @@ chrome.action.onClicked.addListener((tab) => {
 
   async function storeNotificationPayload(id, text) {
     try {
-      const { [NOTIF_MAP_KEY]: notifSmsMap } = await new Promise((resolve) => {
-        chrome.storage.local.get([NOTIF_MAP_KEY], resolve);
-      });
+      const { [NOTIF_MAP_KEY]: notifSmsMap } = await SharedStorage.getLocal([NOTIF_MAP_KEY]);
       const map = notifSmsMap && typeof notifSmsMap === 'object' ? notifSmsMap : {};
       map[id] = { text, time: Date.now() };
       // 最多保留50条映射
@@ -402,32 +349,24 @@ chrome.action.onClicked.addListener((tab) => {
         const toRemove = entries.slice(0, entries.length - 50).map(([k]) => k);
         toRemove.forEach(k => delete map[k]);
       }
-      await new Promise((resolve) => {
-        chrome.storage.local.set({ [NOTIF_MAP_KEY]: map }, resolve);
-      });
+      await SharedStorage.setLocal({ [NOTIF_MAP_KEY]: map });
     } catch (e) {
       // 忽略映射写入错误
     }
   }
 
   async function readNotificationPayload(id) {
-    const { [NOTIF_MAP_KEY]: notifSmsMap } = await new Promise((resolve) => {
-      chrome.storage.local.get([NOTIF_MAP_KEY], resolve);
-    });
+    const { [NOTIF_MAP_KEY]: notifSmsMap } = await SharedStorage.getLocal([NOTIF_MAP_KEY]);
     const entry = notifSmsMap && notifSmsMap[id];
     return entry && entry.text ? entry.text : '';
   }
 
   async function removeNotificationPayload(id) {
     try {
-      const { [NOTIF_MAP_KEY]: notifSmsMap } = await new Promise((resolve) => {
-        chrome.storage.local.get([NOTIF_MAP_KEY], resolve);
-      });
+      const { [NOTIF_MAP_KEY]: notifSmsMap } = await SharedStorage.getLocal([NOTIF_MAP_KEY]);
       if (notifSmsMap && notifSmsMap[id]) {
         delete notifSmsMap[id];
-        await new Promise((resolve) => {
-          chrome.storage.local.set({ [NOTIF_MAP_KEY]: notifSmsMap }, resolve);
-        });
+        await SharedStorage.setLocal({ [NOTIF_MAP_KEY]: notifSmsMap });
       }
     } catch (_) {}
   }

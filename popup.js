@@ -49,17 +49,15 @@ document.addEventListener('DOMContentLoaded', function() {
   });
   
   // 监听后台轮询的更新消息，收到后刷新当前查询列表
-  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message && message.type === 'smsListUpdated') {
-      try {
-        // 保持用户当前筛选条件，重置分页并刷新
-        resetPagination();
-        currentSmsType = querySmsTypeSelect.value;
-        currentKeyword = querySmsKeywordInput.value.trim();
-        querySmsMessages(currentSmsType, currentKeyword, true);
-      } catch (e) {
-        console.error('刷新短信列表失败:', e);
-      }
+  SharedBus.on(SharedBus.Types.SMS_LIST_UPDATED, (payload, sender, sendResponse) => {
+    try {
+      // 保持用户当前筛选条件，重置分页并刷新
+      resetPagination();
+      currentSmsType = querySmsTypeSelect.value;
+      currentKeyword = querySmsKeywordInput.value.trim();
+      querySmsMessages(currentSmsType, currentKeyword, true);
+    } catch (e) {
+      console.error('刷新短信列表失败:', e);
     }
   });
   
@@ -132,16 +130,16 @@ document.addEventListener('DOMContentLoaded', function() {
   // 查询接口相关代码已移除
   
   // 检查是否有从右键菜单选中的文本
-  chrome.storage.local.get(['selectedText'], function(items) {
-    if (items.selectedText) {
+  SharedStorage.getLocal(['selectedText']).then((items) => {
+    if (items && items.selectedText) {
       messageInput.value = items.selectedText;
       // 使用后清除存储的文本
-      chrome.storage.local.remove(['selectedText']);
+      SharedStorage.removeLocal(['selectedText']);
     }
   });
   
   // 从存储中加载设置和SIM卡配置
-  chrome.storage.sync.get(['serverUrl', 'secret', 'apiConfigData'], function(items) {
+  SharedStorage.getSync(['serverUrl', 'secret', 'apiConfigData']).then((items) => {
     // 检查是否已配置
     if (!items.serverUrl || !items.secret) {
       showStatus('请先配置SmsForwarder服务器设置', 'error');
@@ -245,9 +243,7 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // 获取设置
     try {
-      const items = await new Promise((resolve) => {
-        chrome.storage.sync.get(['serverUrl', 'secret', 'simInfoList'], resolve);
-      });
+      const items = await SharedStorage.getSync(['serverUrl', 'secret', 'simInfoList']);
       
       if (!items.serverUrl || !items.secret) {
         showStatus('请先配置SmsForwarder服务器设置', 'error');
@@ -260,12 +256,6 @@ document.addEventListener('DOMContentLoaded', function() {
       }
       
       // 准备请求参数
-      const timestamp = Date.now().toString();
-      const sign = await generateSign(items.secret, timestamp);
-      
-      // 构建请求URL和数据 - 根据新的API格式调整
-      const url = items.serverUrl + "/sms/send";
-      
       // 确保sim_slot是整数
       let simSlotValue = parseInt(simSlot);
       console.log(`解析后的卡槽值: ${simSlotValue}`);
@@ -276,33 +266,11 @@ document.addEventListener('DOMContentLoaded', function() {
         simSlotValue = 0;
       }
       
-      const requestData = {
-        data: {
-          sim_slot: simSlotValue,
-          phone_numbers: phone,
-          msg_content: message
-        },
-        timestamp: parseInt(timestamp),
-        sign: sign
-      };
-      
-      console.log('发送短信请求数据:', JSON.stringify(requestData, null, 2));
+      console.log('发送短信请求数据:', JSON.stringify({ sim_slot: simSlotValue, phone_numbers: phone, msg_content: message }, null, 2));
       
       // 发送请求
       try {
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json'
-          },
-          body: JSON.stringify(requestData),
-          // 添加超时处理
-          signal: AbortSignal.timeout(10000), // 10秒超时
-          // 添加CORS模式
-          mode: 'cors',
-          credentials: 'same-origin'
-        });
+        const response = await SharedApi.signedPost(items.serverUrl, "/sms/send", items.secret, { sim_slot: simSlotValue, phone_numbers: phone, msg_content: message }, { timeoutMs: 10000 });
         
         if (!response.ok) {
           throw new Error(`HTTP error! Status: ${response.status}`);
@@ -316,7 +284,7 @@ document.addEventListener('DOMContentLoaded', function() {
           messageInput.value = '';
           // 保存短信ID用于后续查询
           if (data.data && typeof data.data === 'string') {
-            chrome.storage.local.set({ 'lastSmsId': data.data });
+            SharedStorage.setLocal({ lastSmsId: data.data });
           }
         } else {
           showStatus(`发送失败: ${data.msg || '未知错误'}`, 'error');
@@ -341,41 +309,7 @@ document.addEventListener('DOMContentLoaded', function() {
     statusDiv.style.display = 'block';
   }
   
-  // 生成签名
-  async function generateSign(secret, timestamp) {
-    // 根据规范，签名字符串应为 timestamp+"\n"+密钥
-    return await hmacSHA256(timestamp + "\n" + secret, secret);
-  }
-  
-  // HMAC-SHA256 实现
-  async function hmacSHA256(message, key) {
-    // 使用 SubtleCrypto API 计算 HMAC
-    const encoder = new TextEncoder();
-    const keyData = encoder.encode(key);
-    const messageData = encoder.encode(message);
-    
-    // 导入密钥
-    const cryptoKey = await window.crypto.subtle.importKey(
-      'raw',
-      keyData,
-      { name: 'HMAC', hash: 'SHA-256' },
-      false,
-      ['sign']
-    );
-    
-    // 计算签名
-    const signature = await window.crypto.subtle.sign(
-      'HMAC',
-      cryptoKey,
-      messageData
-    );
-    
-    // 转换为Base64
-    const base64Signature = btoa(String.fromCharCode(...new Uint8Array(signature)));
-    
-    // 进行URL编码
-    return encodeURIComponent(base64Signature);
-  }
+
   
   // 查询短信列表函数
   async function querySmsMessages(smsType, keyword, isReset = true) {
@@ -414,9 +348,7 @@ document.addEventListener('DOMContentLoaded', function() {
     let didRenderFromLocal = false;
     if (isReset || currentPage === 1) {
       try {
-        const localItems = await new Promise((resolve) => {
-          chrome.storage.local.get(['polledSmsList'], resolve);
-        });
+        const localItems = await SharedStorage.getLocal(['polledSmsList']);
         const localListRaw = Array.isArray(localItems.polledSmsList) ? localItems.polledSmsList : [];
         // 按时间降序排序
         const localList = localListRaw.slice().sort((a, b) => {
@@ -488,9 +420,7 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // 获取设置（服务端回退）
     try {
-      const items = await new Promise((resolve) => {
-        chrome.storage.sync.get(['serverUrl', 'secret'], resolve);
-      });
+      const items = await SharedStorage.getSync(['serverUrl', 'secret']);
       
       if (!items.serverUrl || !items.secret) {
         showStatus('请先配置SmsForwarder服务器设置', 'error');
@@ -499,45 +429,26 @@ document.addEventListener('DOMContentLoaded', function() {
       }
       
       // 准备请求参数
-      const timestamp = Date.now().toString();
-      const sign = await generateSign(items.secret, timestamp);
-      
-      // 构建请求URL和数据
-      const url = items.serverUrl + "/sms/query";
-      const requestData = {
-        data: {
-          type: parseInt(smsType),
-          page_num: currentPage,
-          page_size: 20
-        },
-        timestamp: timestamp,
-        sign: sign
+      const payload = {
+        type: parseInt(smsType),
+        page_num: currentPage,
+        page_size: 20
       };
       
       // 如果有关键字，添加到请求数据中
       if (keyword) {
-        requestData.data.keyword = keyword;
+        payload.keyword = keyword;
       }
       
       // 发送请求
       try {
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json'
-          },
-          body: JSON.stringify(requestData),
-          signal: AbortSignal.timeout(10000), // 10秒超时
-          mode: 'cors',
-          credentials: 'same-origin'
-        });
-        
-        if (!response.ok) {
-          throw new Error(`HTTP error! Status: ${response.status}`);
-        }
-        
-        const data = await response.json();
+        const response = await SharedApi.signedPost(items.serverUrl, "/sms/query", items.secret, payload, { timeoutMs: 10000 });
+           
+           if (!response.ok) {
+             throw new Error(`HTTP error! Status: ${response.status}`);
+           }
+           
+           const data = await response.json();
         console.log('查询短信列表响应:', data);
         // 移除加载更多的提示
         const loadingMoreElement = document.getElementById('loadingMore');

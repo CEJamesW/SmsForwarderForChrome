@@ -109,7 +109,7 @@ document.addEventListener('DOMContentLoaded', function() {
       
       // 准备请求参数
       const timestamp = Date.now().toString();
-      const sign = await generateSign(secret, timestamp);
+      const sign = await SharedCrypto.generateSign(secret, timestamp);
       
       // 构建请求URL和数据 - 使用/config/query接口
       const url = serverUrl + "/config/query";
@@ -523,39 +523,5 @@ document.addEventListener('DOMContentLoaded', function() {
       }, 3000);
     }
   }
-  // 生成签名
-  async function generateSign(secret, timestamp) {
-    // 根据规范，签名字符串应为 timestamp+"\n"+密钥
-    return await hmacSHA256(timestamp + "\n" + secret, secret);
-  }
-  
-  // HMAC-SHA256 实现
-  async function hmacSHA256(message, key) {
-    // 使用 SubtleCrypto API 计算 HMAC
-    const encoder = new TextEncoder();
-    const keyData = encoder.encode(key);
-    const messageData = encoder.encode(message);
-    
-    // 导入密钥
-    const cryptoKey = await window.crypto.subtle.importKey(
-      'raw',
-      keyData,
-      { name: 'HMAC', hash: 'SHA-256' },
-      false,
-      ['sign']
-    );
-    
-    // 计算签名
-    const signature = await window.crypto.subtle.sign(
-      'HMAC',
-      cryptoKey,
-      messageData
-    );
-    
-    // 转换为Base64
-    const base64Signature = btoa(String.fromCharCode(...new Uint8Array(signature)));
-    
-    // 进行URL编码
-    return encodeURIComponent(base64Signature);
-  }
+
 });
