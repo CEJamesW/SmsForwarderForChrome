@@ -50,13 +50,6 @@ function ensureContextMenus() {
 // 解压扩展被手动“重新加载”时也立即刷新菜单，不依赖 onInstalled 是否触发。
 ensureContextMenus();
 
-// 清理旧 service worker 遗留的常驻短信通知，避免修复后旧弹窗仍停留在右下角。
-chrome.notifications.getAll((notifications) => {
-  Object.keys(notifications || {}).forEach((id) => {
-    if (id.indexOf('sms-notif-') === 0) chrome.notifications.clear(id);
-  });
-});
-
 async function fillPhoneFromContextMenu(info, tab) {
   if (!tab || !tab.id) return;
   try {
@@ -384,33 +377,16 @@ chrome.action.onClicked.addListener((tab) => {
   const NOTIF_MAP_KEY = 'notifSmsMap';
 
   async function notifyNewSms(sms, code) {
-    // 如果未传入 code，尝试再次提取（兜底）
-    if (!code && sms.content) {
-      const settings = await SharedStorage.getSync(['customCodePattern']);
-      code = SharedCodeUtil.extractVerificationCode(sms.content, settings.customCodePattern || '');
-    }
-    if (!code) code = sms.extractedCode || null;
+    if (!code) return;
 
     const contact = sms.name || sms.contact || '新短信';
     const number = sms.number || sms.from || sms.to || '';
-    const title = code
-      ? `${contact}${number ? ' (' + number + ')' : ''} — 验证码: ${code}`
-      : (number ? `${contact} (${number})` : contact);
+    const title = `${contact}${number ? ' (' + number + ')' : ''} — 验证码: ${code}`;
     const message = sms.content || '';
     const notificationId = `sms-notif-${Date.now()}-${Math.random().toString(36).slice(2,8)}`;
 
     // 保存待复制的内容
     await storeNotificationPayload(notificationId, message, code);
-
-    // 通知按钮
-    const buttons = code
-      ? [
-          { title: '复制验证码' },
-          { title: '复制短信' }
-        ]
-      : [
-          { title: '复制短信' }
-        ];
 
     // 创建通知
     chrome.notifications.create(notificationId, {
@@ -418,11 +394,14 @@ chrome.action.onClicked.addListener((tab) => {
       iconUrl: chrome.runtime.getURL('images/icon48.png'),
       title,
       message,
-      contextMessage: code ? '已尝试自动填入验证码' : '来源: SmsForwarder',
-      requireInteraction: !!code,
+      contextMessage: '已尝试自动填入验证码',
+      requireInteraction: true,
       isClickable: true,
       priority: 2,
-      buttons
+      buttons: [
+        { title: '复制验证码' },
+        { title: '复制短信' }
+      ]
     }, (createdId) => {
       if (chrome.runtime.lastError) {
         logError(`[Notify] 创建失败: ${chrome.runtime.lastError.message}`);
