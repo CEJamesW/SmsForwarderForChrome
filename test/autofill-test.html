@@ -1,0 +1,902 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SmsForwarder 自动填充功能测试</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #0d1117; color: #c9d1d9; padding: 20px; line-height: 1.6;
+  }
+  h1 { color: #58a6ff; font-size: 1.5em; margin-bottom: 8px; }
+  h2 { color: #79c0ff; font-size: 1.2em; margin: 20px 0 10px; border-bottom: 1px solid #30363d; padding-bottom: 6px; }
+  .subtitle { color: #8b949e; font-size: 0.85em; margin-bottom: 20px; }
+  .test-section {
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+    padding: 16px; margin-bottom: 16px;
+  }
+  .test-section h3 { color: #7ee787; font-size: 1em; margin-bottom: 8px; }
+  .test-desc { color: #8b949e; font-size: 0.8em; margin-bottom: 10px; }
+  .form-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+  .form-row label { min-width: 180px; font-size: 0.85em; color: #c9d1d9; }
+  input, select, button {
+    font-size: 14px; padding: 6px 10px; border-radius: 4px; border: 1px solid #30363d;
+    background: #0d1117; color: #c9d1d9;
+  }
+  input:focus { border-color: #58a6ff; outline: none; box-shadow: 0 0 0 2px rgba(88,166,255,0.2); }
+  button {
+    cursor: pointer; border: none; padding: 8px 16px; font-weight: 600;
+  }
+  .btn-primary { background: #238636; color: #fff; }
+  .btn-primary:hover { background: #2ea043; }
+  .btn-secondary { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; }
+  .btn-secondary:hover { background: #30363d; }
+  .btn-danger { background: #da3633; color: #fff; }
+  .btn-danger:hover { background: #f85149; }
+  .controls {
+    position: sticky; top: 0; z-index: 100; background: #0d1117; padding: 12px 0;
+    border-bottom: 1px solid #30363d; margin-bottom: 20px;
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+  }
+  .controls input { width: 140px; }
+  .log-panel {
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+    padding: 12px; margin-top: 16px; max-height: 300px; overflow-y: auto;
+    font-family: 'Consolas', 'Monaco', monospace; font-size: 0.8em;
+  }
+  .log-entry { padding: 2px 0; border-bottom: 1px solid #21262d; }
+  .log-pass { color: #7ee787; }
+  .log-fail { color: #f85149; }
+  .log-info { color: #79c0ff; }
+  .log-warn { color: #d29922; }
+  .results-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; margin-top: 10px;
+  }
+  .result-card {
+    background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 10px;
+  }
+  .result-card.pass { border-color: #7ee787; }
+  .result-card.fail { border-color: #f85149; }
+  .result-title { font-size: 0.8em; color: #8b949e; margin-bottom: 4px; }
+  .result-value { font-size: 0.9em; font-weight: 600; }
+  .result-status { font-size: 0.75em; margin-top: 4px; }
+  .pass-text { color: #7ee787; }
+  .fail-text { color: #f85149; }
+  .country-select {
+    display: inline-block; min-width: 80px;
+  }
+  .info-banner {
+    background: #1c2128; border: 1px solid #30363d; border-radius: 6px;
+    padding: 10px; margin-bottom: 16px; font-size: 0.8em; color: #8b949e;
+  }
+  .info-banner code { background: #0d1117; padding: 2px 6px; border-radius: 3px; color: #79c0ff; }
+  .hidden { display: none; }
+  /* React-like input simulation */
+  .react-input { position: relative; }
+</style>
+</head>
+<body>
+
+<h1>SmsForwarder 验证码 & 手机号 自动填充测试</h1>
+<p class="subtitle">模拟 Chrome 扩展的 executeScript 注入逻辑，测试各种输入框类型的填充效果</p>
+
+<div class="info-banner">
+  此页面内嵌了与 <code>background.js</code> 中 <code>fillCodeInPage</code> / <code>fillPhoneInPage</code> 完全一致的逻辑。
+  点击"模拟收到短信"按钮后，页面将自动尝试填充所有验证码和手机号输入框，并报告结果。
+</div>
+
+<!-- Control Panel -->
+<div class="controls">
+  <label style="font-size:0.85em;">测试验证码:</label>
+  <input type="text" id="testCode" value="385291" placeholder="验证码">
+  <label style="font-size:0.85em;">测试手机号:</label>
+  <input type="text" id="testPhone" value="15641268166" placeholder="手机号">
+  <label style="font-size:0.85em;">区号:</label>
+  <input type="text" id="testCountryCode" value="+86" style="width:60px;">
+  <button class="btn-primary" onclick="runAllTests()">模拟收到短信 → 自动填充</button>
+  <button class="btn-secondary" onclick="clearAllInputs()">清空所有输入框</button>
+  <button class="btn-danger" onclick="clearLog()">清空日志</button>
+</div>
+
+<!-- ===================== 验证码输入框测试区 ===================== -->
+<h2>验证码输入框测试</h2>
+
+<div class="test-section">
+  <h3>1. 用户报告的问题输入框</h3>
+  <div class="test-desc">placeholder="请输入验证码" maxlength="6" oninput 过滤非数字 — 这是用户反馈填不进去的那个</div>
+  <div class="form-row">
+    <label>验证码:</label>
+    <input type="text" id="code-1" placeholder="请输入验证码" maxlength="6" oninput="value=value.replace(/[^\d]/g, '')">
+  </div>
+</div>
+
+<div class="test-section">
+  <h3>2. autocomplete="one-time-code"</h3>
+  <div class="test-desc">W3C 标准 OTP 输入框标识，应获得最高优先级检测</div>
+  <div class="form-row">
+    <label>验证码:</label>
+    <input type="text" id="code-2" autocomplete="one-time-code" placeholder="请输入验证码">
+  </div>
+</div>
+
+<div class="test-section">
+  <h3>3. type="tel" + inputmode="numeric"</h3>
+  <div class="test-desc">移动端常见验证码输入框类型</div>
+  <div class="form-row">
+    <label>验证码:</label>
+    <input type="tel" id="code-3" inputmode="numeric" placeholder="请输入验证码" maxlength="6">
+  </div>
+</div>
+
+<div class="test-section">
+  <h3>4. 验证码关键词在 label 中</h3>
+  <div class="test-desc">label[for] 关联的验证码输入框，无 placeholder</div>
+  <div class="form-row">
+    <label for="code-4">短信验证码</label>
+    <input type="text" id="code-4" maxlength="6">
+  </div>
+</div>
+
+<div class="test-section">
+  <h3>5. 验证码关键词在父元素文本中</h3>
+  <div class="test-desc">输入框本身无任何标识，但周围文本含"验证码"</div>
+  <div class="form-row">
+    <div>
+      <span style="font-size:0.85em;">请输入验证码:</span><br>
+      <input type="text" id="code-5" maxlength="6">
+    </div>
+  </div>
+</div>
+
+<div class="test-section">
+  <h3>6. 无任何验证码标识（纯 maxlength=6）</h3>
+  <div class="test-desc">仅靠 maxlength 6 评分，得分较低可能不会被填充</div>
+  <div class="form-row">
+    <label>输入框:</label>
+    <input type="text" id="code-6" maxlength="6" placeholder="6位数字">
+  </div>
+</div>
+
+<div class="test-section">
+  <h3>7. 4位验证码</h3>
+  <div class="test-desc">部分平台使用4位验证码</div>
+  <div class="form-row">
+    <label>验证码:</label>
+    <input type="text" id="code-7" placeholder="请输入验证码" maxlength="4">
+  </div>
+</div>
+
+<div class="test-section">
+  <h3>8. 已有值的验证码输入框（不应覆盖）</h3>
+  <div class="test-desc">输入框已有值，自动填充应跳过此框</div>
+  <div class="form-row">
+    <label>验证码:</label>
+    <input type="text" id="code-8" placeholder="请输入验证码" maxlength="6" value="999999">
+  </div>
+</div>
+
+<!-- ===================== 手机号输入框测试区 ===================== -->
+<h2>手机号输入框测试</h2>
+
+<div class="test-section">
+  <h3>9. 标准手机号输入框 (autocomplete="tel")</h3>
+  <div class="test-desc">W3C 标准电话号码标识</div>
+  <div class="form-row">
+    <label>手机号:</label>
+    <input type="tel" id="phone-1" autocomplete="tel" placeholder="请输入手机号">
+  </div>
+</div>
+
+<div class="test-section">
+  <h3>10. type="tel" + 原生区号 select</h3>
+  <div class="test-desc">带原生 select 下拉框的区号选择器</div>
+  <div class="form-row">
+    <select id="phone-2-cc" class="country-select">
+      <option value="+1">+1 美国</option>
+      <option value="+44">+44 英国</option>
+      <option value="+81">+81 日本</option>
+      <option value="+86">+86 中国</option>
+      <option value="+852">+852 中国香港</option>
+    </select>
+    <input type="tel" id="phone-2" placeholder="请输入手机号">
+  </div>
+</div>
+
+<div class="test-section">
+  <h3>11. placeholder 含"手机号"关键词</h3>
+  <div class="test-desc">仅靠 placeholder 识别</div>
+  <div class="form-row">
+    <label>电话:</label>
+    <input type="text" id="phone-3" placeholder="请输入手机号码">
+  </div>
+</div>
+
+<div class="test-section">
+  <h3>12. maxlength=11 的文本输入框</h3>
+  <div class="test-desc">中国手机号正好11位</div>
+  <div class="form-row">
+    <label>号码:</label>
+    <input type="text" id="phone-4" maxlength="11" placeholder="11位手机号">
+  </div>
+</div>
+
+<div class="test-section">
+  <h3>13. 已有值的手机号框（不应覆盖）</h3>
+  <div class="test-desc">已有值，应跳过</div>
+  <div class="form-row">
+    <label>手机号:</label>
+    <input type="tel" id="phone-5" autocomplete="tel" value="13800138000">
+  </div>
+</div>
+
+<div class="test-section">
+  <h3>14. label 含"手机号"但输入框无标识</h3>
+  <div class="test-desc">靠 label[for] 关联识别</div>
+  <div class="form-row">
+    <label for="phone-6">手机号码</label>
+    <input type="text" id="phone-6">
+  </div>
+</div>
+
+<div class="test-section">
+  <h3>15. 验证码 + 手机号 混合场景</h3>
+  <div class="test-desc">同时存在验证码和手机号输入框，测试是否会正确区分</div>
+  <div class="form-row">
+    <label>手机号:</label>
+    <input type="tel" id="phone-7" placeholder="请输入手机号" autocomplete="tel">
+  </div>
+  <div class="form-row">
+    <label>验证码:</label>
+    <input type="text" id="code-9" placeholder="请输入验证码" maxlength="6" oninput="value=value.replace(/[^\d]/g, '')">
+  </div>
+</div>
+
+<!-- ===================== 验证码提取测试区 ===================== -->
+<h2>验证码提取算法测试</h2>
+<div class="test-section">
+  <h3>16. 从短信文本提取验证码</h3>
+  <div class="test-desc">测试 codeutil.js 的提取算法对各种短信格式的效果</div>
+  <div class="form-row">
+    <button class="btn-secondary" onclick="testExtraction()">运行提取测试</button>
+  </div>
+  <div id="extraction-results" class="results-grid"></div>
+</div>
+
+<!-- ===================== 结果展示区 ===================== -->
+<h2>填充结果</h2>
+<div id="fill-results" class="results-grid"></div>
+
+<!-- ===================== 日志区 ===================== -->
+<h2>执行日志</h2>
+<div id="log-panel" class="log-panel">
+  <div class="log-entry log-info">[系统] 测试页面已加载，点击"模拟收到短信"开始测试</div>
+</div>
+
+<script>
+// ============================================================
+// 以下函数与 background.js 中的 fillCodeInPage / fillPhoneInPage 逻辑完全一致
+// ============================================================
+
+// --- 验证码提取（与 shared/codeutil.js 一致）---
+var DEFAULT_CODE_PATTERNS = [
+  /验证码[：:\s是为约]*([0-9]{4,8})/i,
+  /校验码[：:\s是为约]*([0-9]{4,8})/i,
+  /动态码[：:\s是为约]*([0-9]{4,8})/i,
+  /验证代码[：:\s是为约]*([0-9]{4,8})/i,
+  /安全码[：:\s是为约]*([0-9]{4,8})/i,
+  /认证码[：:\s是为约]*([0-9]{4,8})/i,
+  /确认码[：:\s是为约]*([0-9]{4,8})/i,
+  /取件码[：:\s是为约]*([0-9]{4,8})/i,
+  /激活码[：:\s是为约]*([0-9]{4,8})/i,
+  /短信码[：:\s是为约]*([0-9]{4,8})/i,
+  /([0-9]{4,8})[\s是为]*你的?验证码/i,
+  /([0-9]{4,8})[\s是为]*你的?校验码/i,
+  /([0-9]{4,8})[\s是为]*你的?动态码/i,
+  /(?:verification|verify|security|authentication)[\s]*code[\s:is]*([0-9]{4,8})/i,
+  /(?:one[\s-]*time)[\s]*(?:password|code|pin)[\s:is]*([0-9]{4,8})/i,
+  /(?:otp|pin)[\s:is]*([0-9]{4,8})/i,
+  /code[\s:is]*([0-9]{4,8})/i,
+  /[\u3010\[][\w\u4e00-\u9fff]*[\u3011\]][\s:]*([0-9]{4,8})/,
+  /(?:验证码|校验码|动态码|安全码).{0,10}?([0-9]{4,8})/i,
+];
+
+var SMART_KEYWORDS = [
+  '验证码', '校验码', '动态码', '验证', '安全码', '认证码', '确认码', '短信码', '激活码',
+  'code', 'verify', 'verification', 'otp', 'pin', 'security', 'captcha', 'auth'
+];
+
+function isLikelyNotCode(numStr, text) {
+  var n = parseInt(numStr, 10);
+  if (numStr.length === 4 && n >= 2019 && n <= 2030) return true;
+  if (numStr.length >= 11) return true;
+  return false;
+}
+
+function smartFallback(text) {
+  var digitRe = /(\d{4,8})/g;
+  var candidates = [];
+  var dm;
+  while ((dm = digitRe.exec(text)) !== null) {
+    var num = dm[1];
+    var afterIdx = dm.index + dm[0].length;
+    if (afterIdx < text.length && /\d/.test(text[afterIdx])) continue;
+    if (dm.index > 0 && /\d/.test(text[dm.index - 1])) continue;
+    if (isLikelyNotCode(num, text)) continue;
+    candidates.push({ code: num, index: dm.index });
+  }
+  if (candidates.length === 0) return null;
+  if (candidates.length === 1) return candidates[0].code;
+  var textLower = text.toLowerCase();
+  var best = null;
+  var bestScore = -1;
+  for (var i = 0; i < candidates.length; i++) {
+    var c = candidates[i];
+    var score = 0;
+    for (var k = 0; k < SMART_KEYWORDS.length; k++) {
+      var kwLower = SMART_KEYWORDS[k].toLowerCase();
+      var searchFrom = 0;
+      var kwIdx;
+      while ((kwIdx = textLower.indexOf(kwLower, searchFrom)) >= 0) {
+        var dist = Math.abs(c.index - kwIdx);
+        if (dist < 30) score += 10;
+        else if (dist < 60) score += 5;
+        else if (dist < 120) score += 2;
+        searchFrom = kwIdx + kwLower.length;
+      }
+    }
+    if (c.code.length === 6) score += 3;
+    else if (c.code.length === 4) score += 1;
+    else if (c.code.length === 5) score += 1;
+    if (score > bestScore) { bestScore = score; best = c; }
+  }
+  if (bestScore <= 0) {
+    for (var j = 0; j < candidates.length; j++) {
+      if (candidates[j].code.length === 6) return candidates[j].code;
+    }
+    return candidates[0].code;
+  }
+  return best ? best.code : candidates[0].code;
+}
+
+function extractVerificationCode(text, customPattern) {
+  if (!text || typeof text !== 'string') return null;
+  if (customPattern) {
+    try {
+      var re = new RegExp(customPattern);
+      var m = text.match(re);
+      if (m && m[1]) return m[1];
+      if (m && m[0]) return m[0];
+    } catch (_) {}
+  }
+  for (var i = 0; i < DEFAULT_CODE_PATTERNS.length; i++) {
+    var match = text.match(DEFAULT_CODE_PATTERNS[i]);
+    if (match && match[1]) return match[1];
+  }
+  return smartFallback(text);
+}
+
+// ============================================================
+// fillCodeInPage — 与 background.js 一致
+// ============================================================
+function fillCodeInPage(code) {
+  var KEYWORDS = [
+    'code', 'verify', 'verification', 'captcha', 'otp', 'pin',
+    'authcode', 'auth-code', 'auth_code', 'security', 'token', 'sms',
+    '验证码', '验证', '动态码', '校验码', '安全码', '认证码', '确认码', '短信码'
+  ];
+  var SKIP_TYPES = ['password','submit','button','checkbox','radio','file','hidden','range','color','image','reset','email','url','date','time','datetime-local','month','week'];
+
+  function isVisible(el) {
+    if (!el || !el.getClientRects) return false;
+    var rects = el.getClientRects();
+    if (!rects.length) return false;
+    var style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
+    if (parseFloat(style.opacity) === 0) return false;
+    return true;
+  }
+
+  function findAssociatedLabel(inp) {
+    if (inp.id) {
+      var label = document.querySelector('label[for="' + CSS.escape(inp.id) + '"]');
+      if (label) return label.textContent || '';
+    }
+    var parent = inp.parentElement;
+    while (parent) {
+      if (parent.tagName === 'LABEL') return parent.textContent || '';
+      parent = parent.parentElement;
+    }
+    var labelledBy = inp.getAttribute('aria-labelledby');
+    if (labelledBy) {
+      var labelEl = document.getElementById(labelledBy);
+      if (labelEl) return labelEl.textContent || '';
+    }
+    return '';
+  }
+
+  function scoreInput(inp) {
+    var score = 0;
+    var attrs = [
+      inp.id || '', inp.name || '', inp.placeholder || '',
+      inp.getAttribute('aria-label') || '', inp.getAttribute('autocomplete') || ''
+    ].join(' ').toLowerCase();
+    if ((inp.getAttribute('autocomplete') || '').toLowerCase() === 'one-time-code') score += 10;
+    for (var i = 0; i < KEYWORDS.length; i++) {
+      if (attrs.indexOf(KEYWORDS[i].toLowerCase()) >= 0) { score += 3; break; }
+    }
+    var maxLen = parseInt(inp.getAttribute('maxlength') || '0', 10);
+    if (maxLen >= 4 && maxLen <= 8) score += 2;
+    var inputMode = inp.getAttribute('inputmode') || '';
+    var type = (inp.type || 'text').toLowerCase();
+    if (inputMode === 'numeric' || inputMode === 'digits' || type === 'tel' || type === 'number') score += 1;
+    var labelText = findAssociatedLabel(inp).toLowerCase();
+    for (var i2 = 0; i2 < KEYWORDS.length; i2++) {
+      if (labelText.indexOf(KEYWORDS[i2].toLowerCase()) >= 0) { score += 3; break; }
+    }
+    var parentText = '';
+    var p = inp.parentElement;
+    if (p) parentText = (p.textContent || '').toLowerCase().substring(0, 300);
+    for (var i3 = 0; i3 < KEYWORDS.length; i3++) {
+      if (parentText.indexOf(KEYWORDS[i3].toLowerCase()) >= 0) { score += 1; break; }
+    }
+    if (!inp.value) score += 1;
+    return score;
+  }
+
+  function findCodeInput() {
+    var input = document.querySelector('input[autocomplete="one-time-code"]');
+    if (input && isVisible(input) && !input.disabled && !input.readOnly) return input;
+    var inputs = Array.from(document.querySelectorAll('input'));
+    var best = null;
+    var bestScore = 0;
+    for (var i = 0; i < inputs.length; i++) {
+      var inp = inputs[i];
+      if (!isVisible(inp) || inp.disabled || inp.readOnly) continue;
+      var type = (inp.type || 'text').toLowerCase();
+      if (SKIP_TYPES.indexOf(type) >= 0) continue;
+      var s = scoreInput(inp);
+      if (s > bestScore) { bestScore = s; best = inp; }
+    }
+    return bestScore >= 2 ? best : null;
+  }
+
+  function flashBorder(el) {
+    var orig = { border: el.style.border, boxShadow: el.style.boxShadow, transition: el.style.transition, outline: el.style.outline };
+    el.style.transition = 'border 0.3s ease, box-shadow 0.3s ease, outline 0.3s ease';
+    el.style.border = '2px solid #28a745';
+    el.style.boxShadow = '0 0 0 3px rgba(40, 167, 69, 0.3)';
+    el.style.outline = 'none';
+    setTimeout(function() {
+      el.style.border = orig.border; el.style.boxShadow = orig.boxShadow;
+      el.style.transition = orig.transition; el.style.outline = orig.outline;
+    }, 1500);
+  }
+
+  function setNativeValue(el, value) {
+    var tracker = el._valueTracker;
+    if (tracker) tracker.setValue('');
+    var descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+    if (descriptor && descriptor.set) descriptor.set.call(el, value);
+    else el.value = value;
+  }
+
+  function triggerEvents(el, val) {
+    try { el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: val })); }
+    catch (_) { el.dispatchEvent(new Event('input', { bubbles: true })); }
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    try { el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true })); } catch (_) {}
+  }
+
+  function doFill(inp) {
+    var maxLen = parseInt(inp.getAttribute('maxlength') || '0', 10);
+    var fillValue = (maxLen > 0 && code.length > maxLen) ? code.substring(0, maxLen) : code;
+    inp.focus();
+    setNativeValue(inp, fillValue);
+    triggerEvents(inp, fillValue);
+    if (inp.value !== fillValue) {
+      setNativeValue(inp, fillValue);
+      try { inp.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: fillValue })); }
+      catch(_) { inp.dispatchEvent(new Event('input', { bubbles: true })); }
+      inp.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    if (inp.value !== fillValue) {
+      inp.value = fillValue;
+      inp.dispatchEvent(new Event('input', { bubbles: true }));
+      inp.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    flashBorder(inp);
+    return inp.value === fillValue;
+  }
+
+  var input = findCodeInput();
+  if (!input) return { found: false, filled: false, elementId: null };
+
+  var ok = doFill(input);
+  if (!ok) {
+    setTimeout(function() { try { doFill(input); } catch(_) {} }, 200);
+  }
+  return { found: true, filled: ok, elementId: input.id || '(no-id)', value: input.value, expected: code };
+}
+
+// ============================================================
+// fillPhoneInPage — 与 background.js 一致
+// ============================================================
+function fillPhoneInPage(phoneNumber, countryCode) {
+  var PHONE_KEYWORDS = [
+    'phone', 'mobile', 'tel', 'telephone', 'cellphone',
+    '手机', '电话', '号码', '手机号', '手机号码', '联系号码', '联系电话'
+  ];
+  var SKIP_TYPES = ['password','submit','button','checkbox','radio','file','hidden','range','color','image','reset','email','url','date','time','datetime-local','month','week','search'];
+
+  function isVisible(el) {
+    if (!el || !el.getClientRects) return false;
+    var rects = el.getClientRects();
+    if (!rects.length) return false;
+    var style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
+    if (parseFloat(style.opacity) === 0) return false;
+    return true;
+  }
+
+  function findAssociatedLabel(inp) {
+    if (inp.id) {
+      var label = document.querySelector('label[for="' + CSS.escape(inp.id) + '"]');
+      if (label) return label.textContent || '';
+    }
+    var parent = inp.parentElement;
+    while (parent) {
+      if (parent.tagName === 'LABEL') return parent.textContent || '';
+      parent = parent.parentElement;
+    }
+    var labelledBy = inp.getAttribute('aria-labelledby');
+    if (labelledBy) {
+      var labelEl = document.getElementById(labelledBy);
+      if (labelEl) return labelEl.textContent || '';
+    }
+    return '';
+  }
+
+  function scorePhoneInput(inp) {
+    var score = 0;
+    var attrs = [inp.id || '', inp.name || '', inp.placeholder || '', inp.getAttribute('aria-label') || '', inp.getAttribute('autocomplete') || ''].join(' ').toLowerCase();
+    if ((inp.getAttribute('autocomplete') || '').toLowerCase() === 'tel') score += 10;
+    if ((inp.getAttribute('autocomplete') || '').toLowerCase() === 'tel-national') score += 10;
+    for (var i = 0; i < PHONE_KEYWORDS.length; i++) { if (attrs.indexOf(PHONE_KEYWORDS[i].toLowerCase()) >= 0) { score += 3; break; } }
+    var type = (inp.type || 'text').toLowerCase();
+    if (type === 'tel') score += 3;
+    var maxLen = parseInt(inp.getAttribute('maxlength') || '0', 10);
+    if (maxLen === 11) score += 3; else if (maxLen >= 10 && maxLen <= 13) score += 1;
+    var inputMode = inp.getAttribute('inputmode') || '';
+    if (inputMode === 'numeric' || inputMode === 'tel') score += 1;
+    var labelText = findAssociatedLabel(inp).toLowerCase();
+    for (var i2 = 0; i2 < PHONE_KEYWORDS.length; i2++) { if (labelText.indexOf(PHONE_KEYWORDS[i2].toLowerCase()) >= 0) { score += 3; break; } }
+    var parentText = '';
+    var p = inp.parentElement;
+    if (p) parentText = (p.textContent || '').toLowerCase().substring(0, 300);
+    for (var i3 = 0; i3 < PHONE_KEYWORDS.length; i3++) { if (parentText.indexOf(PHONE_KEYWORDS[i3].toLowerCase()) >= 0) { score += 1; break; } }
+    if (!inp.value) score += 2;
+    var codeKeywords = ['code', 'verify', 'verification', 'captcha', 'otp', 'pin', '验证码', '校验码', '动态码'];
+    for (var ci = 0; ci < codeKeywords.length; ci++) {
+      if (attrs.indexOf(codeKeywords[ci].toLowerCase()) >= 0) { score -= 5; break; }
+      if (labelText.indexOf(codeKeywords[ci].toLowerCase()) >= 0) { score -= 5; break; }
+    }
+    return score;
+  }
+
+  function findPhoneInput() {
+    var input = document.querySelector('input[autocomplete="tel"], input[autocomplete="tel-national"]');
+    if (input && isVisible(input) && !input.disabled && !input.readOnly && !input.value) return input;
+    var telInputs = document.querySelectorAll('input[type="tel"]');
+    for (var t = 0; t < telInputs.length; t++) {
+      if (isVisible(telInputs[t]) && !telInputs[t].disabled && !telInputs[t].readOnly && !telInputs[t].value) return telInputs[t];
+    }
+    var inputs = Array.from(document.querySelectorAll('input'));
+    var best = null; var bestScore = 0;
+    for (var i = 0; i < inputs.length; i++) {
+      var inp = inputs[i];
+      if (!isVisible(inp) || inp.disabled || inp.readOnly) continue;
+      var type = (inp.type || 'text').toLowerCase();
+      if (SKIP_TYPES.indexOf(type) >= 0) continue;
+      if (inp.value) continue;
+      var s = scorePhoneInput(inp);
+      if (s > bestScore) { bestScore = s; best = inp; }
+    }
+    return bestScore >= 3 ? best : null;
+  }
+
+  function setNativeValue(el, value) {
+    var tracker = el._valueTracker;
+    if (tracker) tracker.setValue('');
+    var descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+    if (descriptor && descriptor.set) descriptor.set.call(el, value);
+    else el.value = value;
+  }
+
+  function triggerEvents(el, val) {
+    try { el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: val })); }
+    catch (_) { el.dispatchEvent(new Event('input', { bubbles: true })); }
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    try { el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true })); } catch (_) {}
+  }
+
+  function flashBorder(el) {
+    var orig = { border: el.style.border, boxShadow: el.style.boxShadow, transition: el.style.transition, outline: el.style.outline };
+    el.style.transition = 'border 0.3s ease, box-shadow 0.3s ease, outline 0.3s ease';
+    el.style.border = '2px solid #4285f4';
+    el.style.boxShadow = '0 0 0 3px rgba(66, 133, 244, 0.3)';
+    el.style.outline = 'none';
+    setTimeout(function() { el.style.border = orig.border; el.style.boxShadow = orig.boxShadow; el.style.transition = orig.transition; el.style.outline = orig.outline; }, 1500);
+  }
+
+  function trySetCountryCodeDropdown(countryCode) {
+    var cc = countryCode || '+86';
+    var ccDigits = cc.replace(/\+/g, '');
+    var selects = document.querySelectorAll('select');
+    for (var s = 0; s < selects.length; s++) {
+      var sel = selects[s];
+      if (!isVisible(sel)) continue;
+      var options = sel.querySelectorAll('option');
+      var bestIdx = -1; var bestScore = -1;
+      for (var o = 0; o < options.length; o++) {
+        var optText = (options[o].textContent || '').toLowerCase();
+        var optVal = (options[o].value || '').toLowerCase();
+        var sc = -1;
+        if (optText.indexOf(cc.toLowerCase()) >= 0 || optVal.indexOf(cc.toLowerCase()) >= 0) sc = 10;
+        else if (optText.indexOf(ccDigits) >= 0 || optVal.indexOf(ccDigits) >= 0) sc = 8;
+        else if (optText.indexOf('china') >= 0 || optText.indexOf('中国') >= 0 || optText.indexOf('cn') >= 0) sc = 5;
+        if (sc > bestScore) { bestScore = sc; bestIdx = o; }
+      }
+      if (bestIdx >= 0 && bestScore >= 5) {
+        var selectLooksLikeCC = false;
+        for (var o2 = 0; o2 < options.length; o2++) {
+          var t = (options[o2].textContent || '');
+          if (t.indexOf('+') >= 0 || t.indexOf('中国') >= 0 || t.toLowerCase().indexOf('china') >= 0) { selectLooksLikeCC = true; break; }
+        }
+        if (selectLooksLikeCC) {
+          sel.selectedIndex = bestIdx;
+          sel.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  var cleanPhone = phoneNumber.replace(/\D/g, '');
+  if (cleanPhone.length === 13 && cleanPhone.indexOf('86') === 0) cleanPhone = cleanPhone.substring(2);
+
+  var result = { filled: false, dropdownSet: false, elementId: null, value: null, expected: cleanPhone };
+
+  result.dropdownSet = trySetCountryCodeDropdown(countryCode);
+
+  var input = findPhoneInput();
+  if (input) {
+    input.focus();
+    setNativeValue(input, cleanPhone);
+    triggerEvents(input, cleanPhone);
+    if (input.value !== cleanPhone) {
+      setNativeValue(input, cleanPhone);
+      try { input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: cleanPhone })); }
+      catch(_) { input.dispatchEvent(new Event('input', { bubbles: true })); }
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    if (input.value !== cleanPhone) {
+      input.value = cleanPhone;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    flashBorder(input);
+    result.filled = input.value === cleanPhone;
+    result.elementId = input.id || '(no-id)';
+    result.value = input.value;
+    if (!result.filled) {
+      setTimeout(function() { try { setNativeValue(input, cleanPhone); triggerEvents(input, cleanPhone); flashBorder(input); } catch(_) {} }, 200);
+    }
+  }
+  return result;
+}
+
+// ============================================================
+// 测试逻辑
+// ============================================================
+function log(msg, type) {
+  type = type || 'info';
+  var panel = document.getElementById('log-panel');
+  var entry = document.createElement('div');
+  entry.className = 'log-entry log-' + type;
+  var time = new Date().toLocaleTimeString();
+  entry.textContent = '[' + time + '] ' + msg;
+  panel.appendChild(entry);
+  panel.scrollTop = panel.scrollHeight;
+}
+
+function clearLog() {
+  document.getElementById('log-panel').innerHTML = '<div class="log-entry log-info">[系统] 日志已清空</div>';
+}
+
+function clearAllInputs() {
+  document.querySelectorAll('input[type="text"], input[type="tel"]').forEach(function(el) {
+    // 跳过 controls 区域的输入框
+    if (el.closest('.controls')) return;
+    var tracker = el._valueTracker;
+    if (tracker) tracker.setValue('');
+    var descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+    if (descriptor && descriptor.set) descriptor.set.call(el, '');
+    else el.value = '';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  // 重置 select
+  document.querySelectorAll('select').forEach(function(sel) {
+    if (sel.closest('.controls')) return;
+    sel.selectedIndex = 0;
+  });
+  document.getElementById('fill-results').innerHTML = '';
+  log('所有输入框已清空', 'info');
+}
+
+function addResultCard(title, passed, detail) {
+  var grid = document.getElementById('fill-results');
+  var card = document.createElement('div');
+  card.className = 'result-card ' + (passed ? 'pass' : 'fail');
+  card.innerHTML = '<div class="result-title">' + title + '</div>' +
+    '<div class="result-value">' + detail + '</div>' +
+    '<div class="result-status ' + (passed ? 'pass-text' : 'fail-text') + '">' +
+    (passed ? 'PASS' : 'FAIL') + '</div>';
+  grid.appendChild(card);
+}
+
+function runAllTests() {
+  var code = document.getElementById('testCode').value.trim();
+  var phone = document.getElementById('testPhone').value.trim();
+  var cc = document.getElementById('testCountryCode').value.trim();
+
+  document.getElementById('fill-results').innerHTML = '';
+  log('========== 开始测试 ==========', 'info');
+  log('验证码: ' + code + ' | 手机号: ' + phone + ' | 区号: ' + cc, 'info');
+
+  // 测试验证码填充
+  log('--- 验证码填充测试 ---', 'info');
+  var codeResult = fillCodeInPage(code);
+  if (codeResult.found) {
+    var codePass = codeResult.filled && codeResult.value === code;
+    log('验证码: 找到输入框 #' + codeResult.elementId + ', 填入="' + codeResult.value + '" (期望="' + code + '")', codePass ? 'pass' : 'fail');
+    addResultCard('验证码填充 #' + codeResult.elementId, codePass, '填入: ' + codeResult.value + ' / 期望: ' + code);
+  } else {
+    log('验证码: 未找到输入框', 'fail');
+    addResultCard('验证码填充', false, '未找到验证码输入框');
+  }
+
+  // 测试手机号填充
+  log('--- 手机号填充测试 ---', 'info');
+  var phoneResult = fillPhoneInPage(phone, cc);
+  var cleanPhone = phone.replace(/\D/g, '');
+  if (cleanPhone.length === 13 && cleanPhone.indexOf('86') === 0) cleanPhone = cleanPhone.substring(2);
+  
+  if (phoneResult.filled !== undefined && phoneResult.elementId) {
+    var phonePass = phoneResult.filled && phoneResult.value === cleanPhone;
+    log('手机号: 找到输入框 #' + phoneResult.elementId + ', 填入="' + phoneResult.value + '" (期望="' + cleanPhone + '")', phonePass ? 'pass' : 'fail');
+    addResultCard('手机号填充 #' + phoneResult.elementId, phonePass, '填入: ' + phoneResult.value + ' / 期望: ' + cleanPhone);
+  } else {
+    log('手机号: 未找到输入框', 'fail');
+    addResultCard('手机号填充', false, '未找到手机号输入框');
+  }
+
+  // 区号下拉框
+  if (phoneResult.dropdownSet) {
+    log('区号下拉框: 已设置 ' + cc, 'pass');
+    addResultCard('区号下拉框', true, '已设置: ' + cc);
+  } else {
+    log('区号下拉框: 未找到或未设置', 'warn');
+    addResultCard('区号下拉框', false, '未找到区号下拉框');
+  }
+
+  // 检查所有验证码输入框的值
+  log('--- 逐个检查验证码输入框 ---', 'info');
+  var codeInputIds = ['code-1', 'code-2', 'code-3', 'code-4', 'code-5', 'code-6', 'code-7', 'code-8', 'code-9'];
+  codeInputIds.forEach(function(id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    var val = el.value;
+    var hadValue = el.getAttribute('data-original-value');
+    if (hadValue !== null) {
+      // 这个框原来有值，不应该被覆盖
+      var pass = val === hadValue;
+      log('#' + id + ' (原有值): "' + val + '" (应保持="' + hadValue + '")', pass ? 'pass' : 'fail');
+      addResultCard('#' + id + ' (不被覆盖)', pass, '值: ' + val + ' (应保持: ' + hadValue + ')');
+    } else {
+      var pass = val === code;
+      log('#' + id + ': "' + val + '" (期望="' + code + '")', pass ? 'pass' : 'fail');
+      addResultCard('#' + id, pass, '值: ' + (val || '(空)') + ' / 期望: ' + code);
+    }
+  });
+
+  // 检查所有手机号输入框的值
+  log('--- 逐个检查手机号输入框 ---', 'info');
+  var phoneInputIds = ['phone-1', 'phone-2', 'phone-3', 'phone-4', 'phone-5', 'phone-6', 'phone-7'];
+  phoneInputIds.forEach(function(id) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    var val = el.value;
+    var hadValue = el.getAttribute('data-original-value');
+    if (hadValue !== null) {
+      var pass = val === hadValue;
+      log('#' + id + ' (原有值): "' + val + '" (应保持="' + hadValue + '")', pass ? 'pass' : 'fail');
+      addResultCard('#' + id + ' (不被覆盖)', pass, '值: ' + val + ' (应保持: ' + hadValue + ')');
+    } else {
+      var pass = val === cleanPhone;
+      log('#' + id + ': "' + val + '" (期望="' + cleanPhone + '")', pass ? 'pass' : 'fail');
+      addResultCard('#' + id, pass, '值: ' + (val || '(空)') + ' / 期望: ' + cleanPhone);
+    }
+  });
+
+  // 检查区号 select
+  var ccSelect = document.getElementById('phone-2-cc');
+  if (ccSelect) {
+    var selectedVal = ccSelect.value;
+    var pass = selectedVal === cc;
+    log('区号 select: "' + selectedVal + '" (期望="' + cc + '")', pass ? 'pass' : 'fail');
+  }
+
+  log('========== 测试完成 ==========', 'info');
+}
+
+// 验证码提取测试
+function testExtraction() {
+  var testCases = [
+    { text: '【淘宝】您的验证码为385291，请勿泄露', expected: '385291' },
+    { text: '验证码：123456，5分钟内有效', expected: '123456' },
+    { text: '您的校验码是 886234，请于10分钟内输入', expected: '886234' },
+    { text: '【支付宝】385291是你的验证码', expected: '385291' },
+    { text: 'Your verification code is 456789', expected: '456789' },
+    { text: 'Your one-time password: 1234', expected: '1234' },
+    { text: 'OTP: 998877', expected: '998877' },
+    { text: '【工商银行】您尾号6688的卡，动态码 258369', expected: '258369' },
+    { text: '【京东】验证码 552014，请在30分钟内使用', expected: '552014' },
+    { text: '您的安全码为：4321', expected: '4321' },
+    { text: '【微信】您的验证码为123456，请勿告诉他人。如非本人操作，请忽略本短信', expected: '123456' },
+    { text: '尊敬的客户，您的取件码是 6789，请凭此码取件', expected: '6789' },
+    { text: 'Your code: 777888', expected: '777888' },
+    { text: '【建行】尊敬的客户，您于2024年1月15日的交易验证码为369258', expected: '369258' },
+    { text: '【10086】您的验证码是8412，请不要泄露给他人', expected: '8412' },
+  ];
+
+  var grid = document.getElementById('extraction-results');
+  grid.innerHTML = '';
+
+  var allPass = true;
+  testCases.forEach(function(tc, idx) {
+    var extracted = extractVerificationCode(tc.text);
+    var pass = extracted === tc.expected;
+    if (!pass) allPass = false;
+
+    var card = document.createElement('div');
+    card.className = 'result-card ' + (pass ? 'pass' : 'fail');
+    card.innerHTML = '<div class="result-title">测试 ' + (idx + 1) + '</div>' +
+      '<div style="font-size:0.75em;color:#8b949e;margin-bottom:4px;">' + tc.text.substring(0, 50) + (tc.text.length > 50 ? '...' : '') + '</div>' +
+      '<div class="result-value">提取: ' + (extracted || '(无)') + ' / 期望: ' + tc.expected + '</div>' +
+      '<div class="result-status ' + (pass ? 'pass-text' : 'fail-text') + '">' + (pass ? 'PASS' : 'FAIL') + '</div>';
+    grid.appendChild(card);
+
+    log('提取测试 ' + (idx + 1) + ': ' + (pass ? 'PASS' : 'FAIL') + ' 提取="' + extracted + '" 期望="' + tc.expected + '"', pass ? 'pass' : 'fail');
+  });
+
+  log('提取测试总结: ' + (allPass ? '全部通过' : '有失败'), allPass ? 'pass' : 'fail');
+}
+
+// 记录原有值的输入框
+window.addEventListener('load', function() {
+  ['code-8', 'phone-5'].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el && el.value) {
+      el.setAttribute('data-original-value', el.value);
+    }
+  });
+  log('测试页面初始化完成', 'info');
+});
+</script>
+
+</body>
+</html>

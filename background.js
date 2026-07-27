@@ -632,6 +632,12 @@ chrome.action.onClicked.addListener((tab) => {
     }
 
     function setNativeValue(el, value) {
+      // React _valueTracker trick: React 16+ 使用 ValueTracker 跟踪值变化，
+      // 如果不重置 tracker，dispatchEvent('input') 会被 React 忽略（认为值没变）
+      var tracker = el._valueTracker;
+      if (tracker) {
+        tracker.setValue('');
+      }
       var descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
       if (descriptor && descriptor.set) {
         descriptor.set.call(el, value);
@@ -851,6 +857,11 @@ chrome.action.onClicked.addListener((tab) => {
     }
 
     function setNativeValue(el, value) {
+      // React _valueTracker trick
+      var tracker = el._valueTracker;
+      if (tracker) {
+        tracker.setValue('');
+      }
       var descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
       if (descriptor && descriptor.set) {
         descriptor.set.call(el, value);
