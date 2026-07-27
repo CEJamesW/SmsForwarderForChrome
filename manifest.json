@@ -27,7 +27,8 @@
     "sidePanel"
   ],
   "host_permissions": [
-    "https://*/*"
+    "https://*/*",
+    "http://*/*"
   ],
   "icons": {
     "16": "images/icon16.png",

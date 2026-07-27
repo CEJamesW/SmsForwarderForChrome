@@ -415,18 +415,33 @@ chrome.action.onClicked.addListener((tab) => {
     const tabs = await new Promise((resolve) => {
       chrome.tabs.query({ active: true, currentWindow: true }, resolve);
     });
-    const targetTab = tabs && tabs[0];
+    let targetTab = tabs && tabs[0];
     if (!targetTab) {
-      throw new Error('无活动标签页可用于复制');
+      // 回退：取任意标签页
+      const allTabs = await new Promise((resolve) => {
+        chrome.tabs.query({}, resolve);
+      });
+      targetTab = allTabs && allTabs[0];
     }
+    if (!targetTab) {
+      throw new Error('无可用标签页用于复制');
+    }
+    // 激活标签页以确保剪贴板权限可用
+    try {
+      await chrome.tabs.update(targetTab.id, { active: true });
+    } catch (_) {}
     await chrome.scripting.executeScript({
-      target: { tabId: targetTab.id },
+      target: { tabId: targetTab.id, allFrames: false },
       args: [text],
       func: (txt) => {
         try {
           navigator.clipboard.writeText(txt).catch(() => {
             const ta = document.createElement('textarea');
             ta.value = txt;
+            ta.style.position = 'fixed';
+            ta.style.top = '0';
+            ta.style.left = '0';
+            ta.style.opacity = '0';
             document.body.appendChild(ta);
             ta.focus();
             ta.select();
@@ -436,6 +451,10 @@ chrome.action.onClicked.addListener((tab) => {
         } catch (_) {
           const ta = document.createElement('textarea');
           ta.value = txt;
+          ta.style.position = 'fixed';
+          ta.style.top = '0';
+          ta.style.left = '0';
+          ta.style.opacity = '0';
           document.body.appendChild(ta);
           ta.focus();
           ta.select();
@@ -451,15 +470,27 @@ chrome.action.onClicked.addListener((tab) => {
   function tryAutoFillCode(code, sms) {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       const tab = tabs && tabs[0];
-      if (!tab || !tab.id) return;
+      if (!tab || !tab.id) {
+        logError(`[AutoFill] 无活动标签页，验证码 ${code} 未填入`);
+        return;
+      }
 
+      // 注入到所有框架（含 iframe），提高验证码输入框命中率
       chrome.scripting.executeScript({
-        target: { tabId: tab.id },
+        target: { tabId: tab.id, allFrames: true },
         args: [code],
         func: fillCodeInPage
       }).then((results) => {
-        if (results && results[0] && results[0].result === true) {
-          logError(`[AutoFill] 验证码 ${code} 已自动填入页面`);
+        let filled = false;
+        if (results) {
+          for (const r of results) {
+            if (r && r.result === true) { filled = true; break; }
+          }
+        }
+        if (filled) {
+          logError(`[AutoFill] 验证码 ${code} 已自动填入页面 (tab=${tab.id})`);
+        } else {
+          logError(`[AutoFill] 未找到验证码输入框，验证码 ${code} 未填入 (tab=${tab.id}, url=${tab.url || ''})`);
         }
       }).catch((e) => {
         logError(`[AutoFill] 注入失败: ${e && e.message ? e.message : String(e)}`);
@@ -469,17 +500,18 @@ chrome.action.onClicked.addListener((tab) => {
 
   // 此函数会被注入到页面中执行，不能引用外部变量
   function fillCodeInPage(code) {
-    const KEYWORDS = [
+    var KEYWORDS = [
       'code', 'verify', 'verification', 'captcha', 'otp', 'pin',
       'authcode', 'auth-code', 'auth_code', 'security', 'token', 'sms',
-      '验证码', '验证', '动态码', '校验码', '安全码', '认证码', '确认码'
+      '验证码', '验证', '动态码', '校验码', '安全码', '认证码', '确认码', '短信码'
     ];
+    var SKIP_TYPES = ['password','submit','button','checkbox','radio','file','hidden','range','color','image','reset','email','url','date','time','datetime-local','month','week'];
 
     function isVisible(el) {
       if (!el || !el.getClientRects) return false;
-      const rects = el.getClientRects();
+      var rects = el.getClientRects();
       if (!rects.length) return false;
-      const style = window.getComputedStyle(el);
+      var style = window.getComputedStyle(el);
       if (style.display === 'none' || style.visibility === 'hidden') return false;
       if (parseFloat(style.opacity) === 0) return false;
       return true;
@@ -487,73 +519,84 @@ chrome.action.onClicked.addListener((tab) => {
 
     function findAssociatedLabel(inp) {
       if (inp.id) {
-        const label = document.querySelector('label[for="' + CSS.escape(inp.id) + '"]');
+        var label = document.querySelector('label[for="' + CSS.escape(inp.id) + '"]');
         if (label) return label.textContent || '';
       }
-      let parent = inp.parentElement;
+      var parent = inp.parentElement;
       while (parent) {
         if (parent.tagName === 'LABEL') return parent.textContent || '';
         parent = parent.parentElement;
       }
-      const labelledBy = inp.getAttribute('aria-labelledby');
+      var labelledBy = inp.getAttribute('aria-labelledby');
       if (labelledBy) {
-        const labelEl = document.getElementById(labelledBy);
+        var labelEl = document.getElementById(labelledBy);
         if (labelEl) return labelEl.textContent || '';
       }
       return '';
     }
 
     function scoreInput(inp) {
-      let score = 0;
-      const attrs = [
+      var score = 0;
+      var attrs = [
         inp.id || '', inp.name || '', inp.placeholder || '',
         inp.getAttribute('aria-label') || '', inp.getAttribute('autocomplete') || ''
       ].join(' ').toLowerCase();
 
-      for (const kw of KEYWORDS) {
-        if (attrs.includes(kw.toLowerCase())) { score += 3; break; }
+      // autocomplete="one-time-code" 是最强信号
+      if ((inp.getAttribute('autocomplete') || '').toLowerCase() === 'one-time-code') { score += 10; }
+
+      for (var i = 0; i < KEYWORDS.length; i++) {
+        if (attrs.indexOf(KEYWORDS[i].toLowerCase()) >= 0) { score += 3; break; }
       }
 
-      const maxLen = parseInt(inp.getAttribute('maxlength') || '0', 10);
+      var maxLen = parseInt(inp.getAttribute('maxlength') || '0', 10);
       if (maxLen >= 4 && maxLen <= 8) score += 2;
 
-      const inputMode = inp.getAttribute('inputmode') || '';
-      if (inputMode === 'numeric' || inputMode === 'digits') score += 1;
+      var inputMode = inp.getAttribute('inputmode') || '';
+      var type = (inp.type || 'text').toLowerCase();
+      if (inputMode === 'numeric' || inputMode === 'digits' || type === 'tel' || type === 'number') score += 1;
 
-      const labelText = findAssociatedLabel(inp).toLowerCase();
-      for (const kw of KEYWORDS) {
-        if (labelText.includes(kw.toLowerCase())) { score += 3; break; }
+      var labelText = findAssociatedLabel(inp).toLowerCase();
+      for (var i2 = 0; i2 < KEYWORDS.length; i2++) {
+        if (labelText.indexOf(KEYWORDS[i2].toLowerCase()) >= 0) { score += 3; break; }
       }
 
-      const parentText = (inp.parentElement ? inp.parentElement.textContent : '').toLowerCase().substring(0, 200);
-      for (const kw of KEYWORDS) {
-        if (parentText.includes(kw.toLowerCase())) { score += 1; break; }
+      // 检查附近文本（父元素及祖父元素）
+      var parentText = '';
+      var p = inp.parentElement;
+      if (p) parentText = (p.textContent || '').toLowerCase().substring(0, 300);
+      for (var i3 = 0; i3 < KEYWORDS.length; i3++) {
+        if (parentText.indexOf(KEYWORDS[i3].toLowerCase()) >= 0) { score += 1; break; }
       }
+
+      // 空值加分（更可能是目标输入框）
+      if (!inp.value) score += 1;
 
       return score;
     }
 
     function findCodeInput() {
-      // Strategy 1: autocomplete="one-time-code"
-      let input = document.querySelector('input[autocomplete="one-time-code"]');
+      // 策略1: autocomplete="one-time-code"
+      var input = document.querySelector('input[autocomplete="one-time-code"]');
       if (input && isVisible(input) && !input.disabled && !input.readOnly) return input;
 
-      // Strategy 2: Score-based detection
-      const inputs = Array.from(document.querySelectorAll(
-        'input[type="text"], input[type="tel"], input[type="number"], input:not([type])'
-      ));
-      let best = null;
-      let bestScore = 0;
-      for (const inp of inputs) {
+      // 策略2: 评分检测所有文本类输入框
+      var inputs = Array.from(document.querySelectorAll('input'));
+      var best = null;
+      var bestScore = 0;
+      for (var i = 0; i < inputs.length; i++) {
+        var inp = inputs[i];
         if (!isVisible(inp) || inp.disabled || inp.readOnly) continue;
-        const s = scoreInput(inp);
+        var type = (inp.type || 'text').toLowerCase();
+        if (SKIP_TYPES.indexOf(type) >= 0) continue;
+        var s = scoreInput(inp);
         if (s > bestScore) { bestScore = s; best = inp; }
       }
       return bestScore >= 2 ? best : null;
     }
 
     function flashBorder(el) {
-      const orig = {
+      var orig = {
         border: el.style.border,
         boxShadow: el.style.boxShadow,
         transition: el.style.transition,
@@ -571,20 +614,71 @@ chrome.action.onClicked.addListener((tab) => {
       }, 1500);
     }
 
+    function setNativeValue(el, value) {
+      var descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+      if (descriptor && descriptor.set) {
+        descriptor.set.call(el, value);
+      } else {
+        el.value = value;
+      }
+    }
+
+    function triggerEvents(el, val) {
+      // 使用 InputEvent 提供更好的框架兼容性
+      try {
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: val }));
+      } catch (_) {
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      // 部分框架监听键盘事件
+      try {
+        el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+      } catch (_) {}
+    }
+
+    function doFill(inp) {
+      // 截断到 maxlength
+      var maxLen = parseInt(inp.getAttribute('maxlength') || '0', 10);
+      var fillValue = (maxLen > 0 && code.length > maxLen) ? code.substring(0, maxLen) : code;
+
+      inp.focus();
+      setNativeValue(inp, fillValue);
+      triggerEvents(inp, fillValue);
+
+      // 验证值是否生效；未生效则重试
+      if (inp.value !== fillValue) {
+        setNativeValue(inp, fillValue);
+        try {
+          inp.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: fillValue }));
+        } catch(_) {
+          inp.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        inp.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+
+      // 最后兜底：直接赋值
+      if (inp.value !== fillValue) {
+        inp.value = fillValue;
+        inp.dispatchEvent(new Event('input', { bubbles: true }));
+        inp.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+
+      flashBorder(inp);
+      return inp.value === fillValue;
+    }
+
     var input = findCodeInput();
     if (!input) return false;
 
-    // Use native setter for React/Vue compatibility
-    var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-    nativeSetter.call(input, code);
+    var ok = doFill(input);
 
-    // Trigger events
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-    input.dispatchEvent(new Event('change', { bubbles: true }));
-
-    // Visual feedback
-    flashBorder(input);
-    input.focus();
+    // 框架可能在重渲染后重置值，延迟重试一次
+    if (!ok) {
+      setTimeout(function() {
+        try { doFill(input); } catch(_) {}
+      }, 200);
+    }
 
     return true;
   }
