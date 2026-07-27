@@ -41,7 +41,7 @@ function ensureContextMenus() {
     });
     chrome.contextMenus.create({
       id: 'fillPhoneNumber',
-      title: '填入手机号（自动匹配区号）',
+      title: '填入手机号',
       contexts: ['editable']
     });
   });
@@ -54,11 +54,11 @@ async function fillPhoneFromContextMenu(info, tab) {
   if (!tab || !tab.id) return;
   try {
     const settings = await SharedStorage.getSync([
-      'autoDetectPhone', 'phoneNumber', 'phoneCountryCode', 'apiConfigData'
+      'autoDetectPhone', 'phoneNumber', 'apiConfigData'
     ]);
     const profile = settings.autoDetectPhone === false
-      ? SharedPhoneUtil.resolvePhoneProfile(null, null, settings.phoneNumber || '', settings.phoneCountryCode || '+86')
-      : SharedPhoneUtil.resolvePhoneProfile(null, settings.apiConfigData, settings.phoneNumber || '', settings.phoneCountryCode || '+86');
+      ? SharedPhoneUtil.resolvePhoneProfile(null, null, settings.phoneNumber || '', '+86')
+      : SharedPhoneUtil.resolvePhoneProfile(null, settings.apiConfigData, settings.phoneNumber || '', '+86');
 
     if (!profile) {
       chrome.notifications.create({

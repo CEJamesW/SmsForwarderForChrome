@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SmsForwarderForChrome",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "通过SmsForwarder收发短信的Chrome插件",
   "action": {
     "default_icon": {
