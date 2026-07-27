@@ -73,6 +73,82 @@
     .sms-code-badge .code-num { font-family: 'Courier New', monospace; font-size: 16px; font-weight: bold; letter-spacing: 2px; color: #28a745; }
     .sms-code-copy-btn { background-color: #28a745; color: white; border: none; border-radius: 4px; padding: 2px 8px; font-size: 12px; cursor: pointer; font-weight: 600; }
     .sms-code-copy-btn:hover { background-color: #218838; }
+
+    @media (prefers-color-scheme: dark) {
+      body {
+        color-scheme: dark;
+        background-color: #111827;
+        color: #e5e7eb;
+      }
+      .container {
+        background-color: #1f2937;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+      }
+      .tabs {
+        border-bottom-color: #374151;
+      }
+      .tab {
+        color: #9ca3af;
+      }
+      .tab.active, .settings-link a {
+        color: #60a5fa;
+      }
+      label {
+        color: #f3f4f6;
+      }
+      input, textarea, select {
+        background-color: #111827;
+        color: #f9fafb;
+        border-color: #4b5563;
+      }
+      input::placeholder, textarea::placeholder {
+        color: #9ca3af;
+      }
+      .query-result {
+        background-color: #182131;
+        border-color: #374151;
+        box-shadow: none;
+      }
+      .load-more-tip {
+        color: #9ca3af;
+        border-top-color: #374151;
+        background-color: #182131;
+      }
+      .sms-table th {
+        background-color: #263244;
+        border-bottom-color: #4b5563;
+      }
+      .sms-table td, .sms-code-row td {
+        border-bottom-color: #374151 !important;
+      }
+      .sms-table tr:hover {
+        background-color: #263244;
+      }
+      .sms-table tr.sms-row {
+        border-top-color: #4b5563;
+      }
+      .sms-table td.sms-content {
+        background-color: #111827;
+      }
+      .sms-table td.sms-meta {
+        color: #9ca3af;
+      }
+      .sms-code-badge {
+        background-color: #123524;
+        color: #bbf7d0;
+      }
+      .sms-code-badge .code-num {
+        color: #4ade80;
+      }
+      .success {
+        background-color: #123524;
+        color: #bbf7d0;
+      }
+      .error {
+        background-color: #451a1a;
+        color: #fecaca;
+      }
+    }
   </style>
 </head>
 <body>
