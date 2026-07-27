@@ -7,9 +7,15 @@ document.addEventListener('DOMContentLoaded', function() {
   const statusDiv = document.getElementById('status');
   const loadingDiv = document.getElementById('loading');
   const apiConfigTable = document.getElementById('apiConfigTable');
+  const autoFillCheckbox = document.getElementById('autoFillCode');
+  const customCodePatternInput = document.getElementById('customCodePattern');
+  const saveCodeBtn = document.getElementById('saveCodeBtn');
   
   // 加载保存的设置
   loadSettings();
+  
+  // 加载验证码设置
+  loadCodeSettings();
   
   // 显示接口配置表格
   displayApiConfig();
@@ -30,6 +36,44 @@ document.addEventListener('DOMContentLoaded', function() {
       }
     });
   });
+
+  // 保存验证码设置按钮
+  saveCodeBtn.addEventListener('click', function() {
+    saveCodeSettings();
+  });
+
+  // 加载验证码设置
+  function loadCodeSettings() {
+    chrome.storage.sync.get(['autoFillCode', 'customCodePattern'], function(items) {
+      autoFillCheckbox.checked = items.autoFillCode !== false;
+      if (items.customCodePattern) {
+        customCodePatternInput.value = items.customCodePattern;
+      }
+    });
+  }
+
+  // 保存验证码设置
+  function saveCodeSettings() {
+    const autoFill = autoFillCheckbox.checked;
+    const pattern = customCodePatternInput.value.trim();
+
+    // 如果填写了自定义正则，验证其有效性
+    if (pattern) {
+      try {
+        new RegExp(pattern);
+      } catch (e) {
+        showStatus('自定义正则表达式无效: ' + e.message, 'error');
+        return;
+      }
+    }
+
+    chrome.storage.sync.set({
+      autoFillCode: autoFill,
+      customCodePattern: pattern
+    }, function() {
+      showStatus('验证码设置已保存', 'success');
+    });
+  }
   
   // 加载设置函数
   function loadSettings() {

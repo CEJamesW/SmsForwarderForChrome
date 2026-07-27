@@ -308,6 +308,34 @@ document.addEventListener('DOMContentLoaded', function() {
     }
     statusDiv.style.display = 'block';
   }
+
+  // 生成验证码行的HTML
+  function buildCodeRowHtml(content, customPattern) {
+    const code = SharedCodeUtil.extractVerificationCode(content, customPattern);
+    if (!code) return '';
+    return `<tr class="sms-code-row"><td colspan="3">` +
+      `<span class="sms-code-badge">` +
+      `<span class="code-num">${code}</span>` +
+      `<button class="sms-code-copy-btn" onclick="copyCodeToClipboard('${code}')">复制验证码</button>` +
+      `</span></td></tr>`;
+  }
+
+  // 暴露复制函数供 onclick 调用
+  window.copyCodeToClipboard = function(code) {
+    navigator.clipboard.writeText(code).then(() => {
+      showStatus('验证码已复制: ' + code, 'success');
+      setTimeout(() => { statusDiv.style.display = 'none'; }, 2000);
+    }).catch(() => {
+      const ta = document.createElement('textarea');
+      ta.value = code;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+      showStatus('验证码已复制: ' + code, 'success');
+      setTimeout(() => { statusDiv.style.display = 'none'; }, 2000);
+    });
+  };
   
 
   
@@ -385,6 +413,7 @@ document.addEventListener('DOMContentLoaded', function() {
             resultHTML += `<td class="sms-meta">${formattedDate}</td>`;
             resultHTML += `<td class="sms-meta">${smsTypeText}</td>`;
             resultHTML += `</tr>`;
+            resultHTML += buildCodeRowHtml(sms.content || '');
             resultHTML += `<tr><td colspan="3"><div class="sms-content">${sms.content || ''}</div></td></tr>`;
           });
           resultHTML += '</tbody></table>';
@@ -493,6 +522,9 @@ document.addEventListener('DOMContentLoaded', function() {
               resultHTML += `<td class="sms-meta">${smsTypeText}</td>`;
               resultHTML += `</tr>`;
               
+              // 添加验证码行（如有）
+              resultHTML += buildCodeRowHtml(sms.content);
+
               // 添加内容行
               resultHTML += `<tr><td colspan="3"><div class="sms-content">${sms.content}</div></td></tr>`;
             });
