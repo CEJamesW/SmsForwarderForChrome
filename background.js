@@ -179,9 +179,12 @@ chrome.action.onClicked.addListener((tab) => {
     // 仅在有新增短信时触发通知与写入存储
     if (addedCount > 0) {
       // 读取自动填充设置
-      const settings = await SharedStorage.getSync(['autoFillCode', 'customCodePattern']);
+      const settings = await SharedStorage.getSync(['autoFillCode', 'customCodePattern', 'autoFillPhone', 'phoneNumber', 'phoneCountryCode']);
       const autoFillEnabled = settings.autoFillCode !== false; // 默认开启
       const customPattern = settings.customCodePattern || '';
+      const autoFillPhoneEnabled = settings.autoFillPhone !== false; // 默认开启
+      const phoneNumber = settings.phoneNumber || '';
+      const phoneCountryCode = settings.phoneCountryCode || '+86';
 
       // 提取验证码并触发通知（逐条）
       try {
@@ -189,9 +192,16 @@ chrome.action.onClicked.addListener((tab) => {
           const code = SharedCodeUtil.extractVerificationCode(item.content, customPattern);
           if (code) {
             item.extractedCode = code;
+            logError(`[CodeExtract] 成功提取验证码: ${code} (来源: ${item.number || item.from || '未知'})`);
             if (autoFillEnabled) {
               tryAutoFillCode(code, item);
             }
+          } else {
+            logError(`[CodeExtract] 未能提取验证码，内容: ${(item.content || '').substring(0, 100)}`);
+          }
+          // 如果启用了手机号自动填充且有手机号，尝试填充
+          if (autoFillPhoneEnabled && phoneNumber) {
+            tryAutoFillPhone(phoneNumber, phoneCountryCode);
           }
           await notifyNewSms(item, code);
         }));
@@ -302,6 +312,13 @@ chrome.action.onClicked.addListener((tab) => {
   const NOTIF_MAP_KEY = 'notifSmsMap';
 
   async function notifyNewSms(sms, code) {
+    // 如果未传入 code，尝试再次提取（兜底）
+    if (!code && sms.content) {
+      const settings = await SharedStorage.getSync(['customCodePattern']);
+      code = SharedCodeUtil.extractVerificationCode(sms.content, settings.customCodePattern || '');
+    }
+    if (!code) code = sms.extractedCode || null;
+
     const contact = sms.name || sms.contact || '新短信';
     const number = sms.number || sms.from || sms.to || '';
     const title = code
@@ -681,4 +698,322 @@ chrome.action.onClicked.addListener((tab) => {
     }
 
     return true;
+  }
+
+  // --------------------------- 手机号自动填充模块 ---------------------------
+
+  function tryAutoFillPhone(phoneNumber, countryCode) {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      const tab = tabs && tabs[0];
+      if (!tab || !tab.id) {
+        logError(`[AutoFillPhone] 无活动标签页，手机号未填入`);
+        return;
+      }
+
+      chrome.scripting.executeScript({
+        target: { tabId: tab.id, allFrames: true },
+        args: [phoneNumber, countryCode],
+        func: fillPhoneInPage
+      }).then((results) => {
+        let filled = false;
+        let dropdownSet = false;
+        if (results) {
+          for (const r of results) {
+            if (r && r.result) {
+              if (r.result.filled) filled = true;
+              if (r.result.dropdownSet) dropdownSet = true;
+            }
+          }
+        }
+        if (filled || dropdownSet) {
+          logError(`[AutoFillPhone] 手机号${filled ? '已填入' : '未填入'}${dropdownSet ? '，区号已设置' : ''} (tab=${tab.id})`);
+        } else {
+          logError(`[AutoFillPhone] 未找到手机号输入框 (tab=${tab.id}, url=${tab.url || ''})`);
+        }
+      }).catch((e) => {
+        logError(`[AutoFillPhone] 注入失败: ${e && e.message ? e.message : String(e)}`);
+      });
+    });
+  }
+
+  // 此函数会被注入到页面中执行，不能引用外部变量
+  function fillPhoneInPage(phoneNumber, countryCode) {
+    var PHONE_KEYWORDS = [
+      'phone', 'mobile', 'tel', 'telephone', 'cellphone',
+      '手机', '电话', '号码', '手机号', '手机号码', '联系号码', '联系电话'
+    ];
+    var SKIP_TYPES = ['password','submit','button','checkbox','radio','file','hidden','range','color','image','reset','email','url','date','time','datetime-local','month','week','search'];
+
+    function isVisible(el) {
+      if (!el || !el.getClientRects) return false;
+      var rects = el.getClientRects();
+      if (!rects.length) return false;
+      var style = window.getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden') return false;
+      if (parseFloat(style.opacity) === 0) return false;
+      return true;
+    }
+
+    function findAssociatedLabel(inp) {
+      if (inp.id) {
+        var label = document.querySelector('label[for="' + CSS.escape(inp.id) + '"]');
+        if (label) return label.textContent || '';
+      }
+      var parent = inp.parentElement;
+      while (parent) {
+        if (parent.tagName === 'LABEL') return parent.textContent || '';
+        parent = parent.parentElement;
+      }
+      var labelledBy = inp.getAttribute('aria-labelledby');
+      if (labelledBy) {
+        var labelEl = document.getElementById(labelledBy);
+        if (labelEl) return labelEl.textContent || '';
+      }
+      return '';
+    }
+
+    function scorePhoneInput(inp) {
+      var score = 0;
+      var attrs = [
+        inp.id || '', inp.name || '', inp.placeholder || '',
+        inp.getAttribute('aria-label') || '', inp.getAttribute('autocomplete') || ''
+      ].join(' ').toLowerCase();
+
+      // autocomplete="tel" 是最强信号
+      if ((inp.getAttribute('autocomplete') || '').toLowerCase() === 'tel') score += 10;
+      if ((inp.getAttribute('autocomplete') || '').toLowerCase() === 'tel-national') score += 10;
+
+      for (var i = 0; i < PHONE_KEYWORDS.length; i++) {
+        if (attrs.indexOf(PHONE_KEYWORDS[i].toLowerCase()) >= 0) { score += 3; break; }
+      }
+
+      var type = (inp.type || 'text').toLowerCase();
+      if (type === 'tel') score += 3;
+
+      var maxLen = parseInt(inp.getAttribute('maxlength') || '0', 10);
+      if (maxLen === 11) score += 3; // 中国手机号正好11位
+      else if (maxLen >= 10 && maxLen <= 13) score += 1;
+
+      var inputMode = inp.getAttribute('inputmode') || '';
+      if (inputMode === 'numeric' || inputMode === 'tel') score += 1;
+
+      var labelText = findAssociatedLabel(inp).toLowerCase();
+      for (var i2 = 0; i2 < PHONE_KEYWORDS.length; i2++) {
+        if (labelText.indexOf(PHONE_KEYWORDS[i2].toLowerCase()) >= 0) { score += 3; break; }
+      }
+
+      // 检查附近文本
+      var parentText = '';
+      var p = inp.parentElement;
+      if (p) parentText = (p.textContent || '').toLowerCase().substring(0, 300);
+      for (var i3 = 0; i3 < PHONE_KEYWORDS.length; i3++) {
+        if (parentText.indexOf(PHONE_KEYWORDS[i3].toLowerCase()) >= 0) { score += 1; break; }
+      }
+
+      // 空值加分
+      if (!inp.value) score += 2;
+
+      // 排除验证码类输入框
+      var codeKeywords = ['code', 'verify', 'verification', 'captcha', 'otp', 'pin', '验证码', '校验码', '动态码'];
+      for (var ci = 0; ci < codeKeywords.length; ci++) {
+        if (attrs.indexOf(codeKeywords[ci].toLowerCase()) >= 0) { score -= 5; break; }
+        if (labelText.indexOf(codeKeywords[ci].toLowerCase()) >= 0) { score -= 5; break; }
+      }
+
+      return score;
+    }
+
+    function findPhoneInput() {
+      // 策略1: autocomplete="tel" 或 "tel-national"
+      var input = document.querySelector('input[autocomplete="tel"], input[autocomplete="tel-national"]');
+      if (input && isVisible(input) && !input.disabled && !input.readOnly && !input.value) return input;
+
+      // 策略2: type="tel"
+      var telInputs = document.querySelectorAll('input[type="tel"]');
+      for (var t = 0; t < telInputs.length; t++) {
+        if (isVisible(telInputs[t]) && !telInputs[t].disabled && !telInputs[t].readOnly && !telInputs[t].value) return telInputs[t];
+      }
+
+      // 策略3: 评分检测所有输入框
+      var inputs = Array.from(document.querySelectorAll('input'));
+      var best = null;
+      var bestScore = 0;
+      for (var i = 0; i < inputs.length; i++) {
+        var inp = inputs[i];
+        if (!isVisible(inp) || inp.disabled || inp.readOnly) continue;
+        var type = (inp.type || 'text').toLowerCase();
+        if (SKIP_TYPES.indexOf(type) >= 0) continue;
+        if (inp.value) continue; // 跳过已有值的输入框
+        var s = scorePhoneInput(inp);
+        if (s > bestScore) { bestScore = s; best = inp; }
+      }
+      return bestScore >= 3 ? best : null;
+    }
+
+    function setNativeValue(el, value) {
+      var descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+      if (descriptor && descriptor.set) {
+        descriptor.set.call(el, value);
+      } else {
+        el.value = value;
+      }
+    }
+
+    function triggerEvents(el, val) {
+      try {
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: val }));
+      } catch (_) {
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      try {
+        el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+      } catch (_) {}
+    }
+
+    function flashBorder(el) {
+      var orig = {
+        border: el.style.border,
+        boxShadow: el.style.boxShadow,
+        transition: el.style.transition,
+        outline: el.style.outline
+      };
+      el.style.transition = 'border 0.3s ease, box-shadow 0.3s ease, outline 0.3s ease';
+      el.style.border = '2px solid #4285f4';
+      el.style.boxShadow = '0 0 0 3px rgba(66, 133, 244, 0.3)';
+      el.style.outline = 'none';
+      setTimeout(function() {
+        el.style.border = orig.border;
+        el.style.boxShadow = orig.boxShadow;
+        el.style.transition = orig.transition;
+        el.style.outline = orig.outline;
+      }, 1500);
+    }
+
+    // 检测并设置区号下拉框
+    function trySetCountryCodeDropdown(countryCode) {
+      var cc = countryCode || '+86';
+      var ccDigits = cc.replace(/\+/g, ''); // "86"
+
+      // 策略1: 原生 select 元素
+      var selects = document.querySelectorAll('select');
+      for (var s = 0; s < selects.length; s++) {
+        var sel = selects[s];
+        if (!isVisible(sel)) continue;
+        var options = sel.querySelectorAll('option');
+        var bestIdx = -1;
+        var bestScore = -1;
+        for (var o = 0; o < options.length; o++) {
+          var optText = (options[o].textContent || '').toLowerCase();
+          var optVal = (options[o].value || '').toLowerCase();
+          var sc = -1;
+          // 精确匹配 +86 或 86
+          if (optText.indexOf(cc.toLowerCase()) >= 0 || optVal.indexOf(cc.toLowerCase()) >= 0) sc = 10;
+          else if (optText.indexOf(ccDigits) >= 0 || optVal.indexOf(ccDigits) >= 0) sc = 8;
+          // 匹配 China/中国/CN
+          else if (optText.indexOf('china') >= 0 || optText.indexOf('中国') >= 0 || optText.indexOf('cn') >= 0) sc = 5;
+          if (sc > bestScore) { bestScore = sc; bestIdx = o; }
+        }
+        if (bestIdx >= 0 && bestScore >= 5) {
+          // 检查这个 select 是否像区号选择器（选项中有+号或国家名）
+          var selectLooksLikeCC = false;
+          for (var o2 = 0; o2 < options.length; o2++) {
+            var t = (options[o2].textContent || '');
+            if (t.indexOf('+') >= 0 || t.indexOf('中国') >= 0 || t.toLowerCase().indexOf('china') >= 0) {
+              selectLooksLikeCC = true;
+              break;
+            }
+          }
+          if (selectLooksLikeCC) {
+            sel.selectedIndex = bestIdx;
+            sel.dispatchEvent(new Event('change', { bubbles: true }));
+            return true;
+          }
+        }
+      }
+
+      // 策略2: 自定义下拉框（div/button/span 类组件）
+      // 查找包含 "+86" 或中国国旗的可点击元素
+      var clickableSelectors = 'div[role="combobox"], div[role="listbox"], div[class*="country"], div[class*="select"], button[class*="country"], span[class*="country"], div[tabindex]';
+      var clickables = document.querySelectorAll(clickableSelectors);
+      for (var c = 0; c < clickables.length; c++) {
+        var el = clickables[c];
+        if (!isVisible(el)) continue;
+        var text = (el.textContent || '').trim();
+        if (text.indexOf(cc) >= 0 || text.indexOf('+86') >= 0 || text.indexOf('中国') >= 0) {
+          // 如果文本已经显示 +86，可能已经选中了
+          if (text.indexOf(cc) >= 0 && text.length < 20) return true;
+          // 否则点击展开下拉框
+          try {
+            el.click();
+            // 等待下拉选项出现后点击对应项
+            setTimeout(function() {
+              var items = document.querySelectorAll('div[role="option"], li[role="option"], div[class*="option"], li[class*="option"]');
+              for (var ii = 0; ii < items.length; ii++) {
+                var itemText = (items[ii].textContent || '').toLowerCase();
+                if (itemText.indexOf(cc.toLowerCase()) >= 0 || itemText.indexOf('中国') >= 0 || itemText.indexOf('china') >= 0) {
+                  items[ii].click();
+                  break;
+                }
+              }
+            }, 300);
+            return true;
+          } catch(_) {}
+        }
+      }
+
+      return false;
+    }
+
+    // 清理手机号：只保留数字
+    var cleanPhone = phoneNumber.replace(/\D/g, '');
+    // 如果以86开头且是13位，去掉86前缀
+    if (cleanPhone.length === 13 && cleanPhone.indexOf('86') === 0) {
+      cleanPhone = cleanPhone.substring(2);
+    }
+
+    var result = { filled: false, dropdownSet: false };
+
+    // 先尝试设置区号下拉框
+    result.dropdownSet = trySetCountryCodeDropdown(countryCode);
+
+    // 查找并填充手机号输入框
+    var input = findPhoneInput();
+    if (input) {
+      input.focus();
+      setNativeValue(input, cleanPhone);
+      triggerEvents(input, cleanPhone);
+
+      // 验证值是否生效
+      if (input.value !== cleanPhone) {
+        setNativeValue(input, cleanPhone);
+        try {
+          input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: cleanPhone }));
+        } catch(_) {
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+      if (input.value !== cleanPhone) {
+        input.value = cleanPhone;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+
+      flashBorder(input);
+      result.filled = input.value === cleanPhone;
+
+      // 延迟重试
+      if (!result.filled) {
+        setTimeout(function() {
+          try {
+            setNativeValue(input, cleanPhone);
+            triggerEvents(input, cleanPhone);
+            flashBorder(input);
+          } catch(_) {}
+        }, 200);
+      }
+    }
+
+    return result;
   }

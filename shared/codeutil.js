@@ -48,11 +48,16 @@
 
   // 智能回退：分析所有 4-8 位数字序列，按与关键词距离评分
   function smartFallback(text) {
-    var digitRe = /\b(\d{4,8})\b/g;
+    // 不使用 \b 词边界，因为中文字符与数字之间不一定有词边界
+    var digitRe = /(\d{4,8})/g;
     var candidates = [];
     var dm;
     while ((dm = digitRe.exec(text)) !== null) {
       var num = dm[1];
+      // 检查前后是否还有更多数字（说明是更长数字的一部分，跳过）
+      var afterIdx = dm.index + dm[0].length;
+      if (afterIdx < text.length && /\d/.test(text[afterIdx])) continue;
+      if (dm.index > 0 && /\d/.test(text[dm.index - 1])) continue;
       if (isLikelyNotCode(num, text)) continue;
       candidates.push({ code: num, index: dm.index });
     }

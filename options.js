@@ -10,12 +10,19 @@ document.addEventListener('DOMContentLoaded', function() {
   const autoFillCheckbox = document.getElementById('autoFillCode');
   const customCodePatternInput = document.getElementById('customCodePattern');
   const saveCodeBtn = document.getElementById('saveCodeBtn');
+  const autoFillPhoneCheckbox = document.getElementById('autoFillPhone');
+  const phoneNumberInput = document.getElementById('phoneNumber');
+  const phoneCountryCodeInput = document.getElementById('phoneCountryCode');
+  const savePhoneBtn = document.getElementById('savePhoneBtn');
   
   // 加载保存的设置
   loadSettings();
   
   // 加载验证码设置
   loadCodeSettings();
+
+  // 加载手机号设置
+  loadPhoneSettings();
   
   // 显示接口配置表格
   displayApiConfig();
@@ -42,6 +49,11 @@ document.addEventListener('DOMContentLoaded', function() {
     saveCodeSettings();
   });
 
+  // 保存手机号设置按钮
+  savePhoneBtn.addEventListener('click', function() {
+    savePhoneSettings();
+  });
+
   // 加载验证码设置
   function loadCodeSettings() {
     chrome.storage.sync.get(['autoFillCode', 'customCodePattern'], function(items) {
@@ -49,6 +61,40 @@ document.addEventListener('DOMContentLoaded', function() {
       if (items.customCodePattern) {
         customCodePatternInput.value = items.customCodePattern;
       }
+    });
+  }
+
+  // 加载手机号设置
+  function loadPhoneSettings() {
+    chrome.storage.sync.get(['autoFillPhone', 'phoneNumber', 'phoneCountryCode'], function(items) {
+      autoFillPhoneCheckbox.checked = items.autoFillPhone !== false;
+      if (items.phoneNumber) {
+        phoneNumberInput.value = items.phoneNumber;
+      }
+      if (items.phoneCountryCode) {
+        phoneCountryCodeInput.value = items.phoneCountryCode;
+      }
+    });
+  }
+
+  // 保存手机号设置
+  function savePhoneSettings() {
+    const autoFill = autoFillPhoneCheckbox.checked;
+    const phone = phoneNumberInput.value.trim();
+    const countryCode = phoneCountryCodeInput.value.trim() || '+86';
+
+    // 简单验证手机号格式（11位数字）
+    if (phone && !/^1\d{10}$/.test(phone)) {
+      showStatus('手机号格式不正确，应为11位数字（以1开头）', 'error');
+      return;
+    }
+
+    chrome.storage.sync.set({
+      autoFillPhone: autoFill,
+      phoneNumber: phone,
+      phoneCountryCode: countryCode
+    }, function() {
+      showStatus('手机号设置已保存', 'success');
     });
   }
 
