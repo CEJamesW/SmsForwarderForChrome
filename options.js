@@ -10,7 +10,7 @@ document.addEventListener('DOMContentLoaded', function() {
   const autoFillCheckbox = document.getElementById('autoFillCode');
   const customCodePatternInput = document.getElementById('customCodePattern');
   const saveCodeBtn = document.getElementById('saveCodeBtn');
-  const autoFillPhoneCheckbox = document.getElementById('autoFillPhone');
+  const autoDetectPhoneCheckbox = document.getElementById('autoDetectPhone');
   const phoneNumberInput = document.getElementById('phoneNumber');
   const phoneCountryCodeInput = document.getElementById('phoneCountryCode');
   const savePhoneBtn = document.getElementById('savePhoneBtn');
@@ -66,8 +66,8 @@ document.addEventListener('DOMContentLoaded', function() {
 
   // 加载手机号设置
   function loadPhoneSettings() {
-    chrome.storage.sync.get(['autoFillPhone', 'phoneNumber', 'phoneCountryCode'], function(items) {
-      autoFillPhoneCheckbox.checked = items.autoFillPhone !== false;
+    chrome.storage.sync.get(['autoDetectPhone', 'phoneNumber', 'phoneCountryCode'], function(items) {
+      autoDetectPhoneCheckbox.checked = items.autoDetectPhone !== false;
       if (items.phoneNumber) {
         phoneNumberInput.value = items.phoneNumber;
       }
@@ -79,18 +79,21 @@ document.addEventListener('DOMContentLoaded', function() {
 
   // 保存手机号设置
   function savePhoneSettings() {
-    const autoFill = autoFillPhoneCheckbox.checked;
     const phone = phoneNumberInput.value.trim();
     const countryCode = phoneCountryCodeInput.value.trim() || '+86';
 
-    // 简单验证手机号格式（11位数字）
-    if (phone && !/^1\d{10}$/.test(phone)) {
-      showStatus('手机号格式不正确，应为11位数字（以1开头）', 'error');
+    const phoneDigits = phone.replace(/\D/g, '');
+    if (phone && (phoneDigits.length < 5 || phoneDigits.length > 18)) {
+      showStatus('备用手机号格式不正确，应包含5到18位数字', 'error');
+      return;
+    }
+    if (!/^\+?\d{1,4}$/.test(countryCode)) {
+      showStatus('国家区号格式不正确，例如 +86', 'error');
       return;
     }
 
     chrome.storage.sync.set({
-      autoFillPhone: autoFill,
+      autoDetectPhone: autoDetectPhoneCheckbox.checked,
       phoneNumber: phone,
       phoneCountryCode: countryCode
     }, function() {

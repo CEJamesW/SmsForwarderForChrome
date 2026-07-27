@@ -48,6 +48,12 @@
 
   // 智能回退：分析所有 4-8 位数字序列，按与关键词距离评分
   function smartFallback(text) {
+    var textLower = text.toLowerCase();
+    var hasCodeSemantics = SMART_KEYWORDS.some(function(keyword) {
+      return textLower.indexOf(keyword.toLowerCase()) >= 0;
+    });
+    if (!hasCodeSemantics) return null;
+
     // 不使用 \b 词边界，因为中文字符与数字之间不一定有词边界
     var digitRe = /(\d{4,8})/g;
     var candidates = [];
@@ -66,7 +72,6 @@
     if (candidates.length === 1) return candidates[0].code;
 
     // 多个候选：按与关键词的距离评分
-    var textLower = text.toLowerCase();
     var best = null;
     var bestScore = -1;
 
@@ -96,12 +101,9 @@
       if (score > bestScore) { bestScore = score; best = c; }
     }
 
-    // 如果所有候选评分都为 0（没有关键词邻近），优先取 6 位数，否则取第一个
+    // 没有验证码语义时不要猜测，避免把订单号、金额或年份自动填入表单。
     if (bestScore <= 0) {
-      for (var j = 0; j < candidates.length; j++) {
-        if (candidates[j].code.length === 6) return candidates[j].code;
-      }
-      return candidates[0].code;
+      return null;
     }
 
     return best ? best.code : candidates[0].code;

@@ -28,6 +28,13 @@ const testCases = [
   { text: '【拼多多】你的验证码:135790,请勿泄露', expected: '135790' },
   { text: 'Verification code for your account: 864209', expected: '864209' },
   { text: 'PIN: 0000', expected: '0000' },
+  { text: '订单 884211 已发货，请注意查收', expected: null },
+  { text: '您本次消费 2024 元，余额 123456 元', expected: null },
+  { text: '联系电话 13812345678', expected: null },
+  {
+    text: '【积分提醒】截至本月12日，您有1900积分。请点击 m.10010.cn/qAZRw?u=63cc0a340b0f488d 或通过“中国联通APP-可用积分”登录积分商城查询、使用积分【中国联通】',
+    expected: null
+  },
 ];
 
 let passCount = 0;

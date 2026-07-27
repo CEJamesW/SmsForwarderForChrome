@@ -1,4 +1,4 @@
-importScripts('shared/crypto.js', 'shared/api.js', 'shared/storage.js', 'shared/bus.js', 'shared/codeutil.js');
+importScripts('shared/crypto.js', 'shared/api.js', 'shared/storage.js', 'shared/bus.js', 'shared/codeutil.js', 'shared/phoneutil.js', 'shared/smsutil.js');
 // 插件安装或更新时触发
 chrome.runtime.onInstalled.addListener(function() {
   // 初始化默认设置
@@ -9,12 +9,6 @@ chrome.runtime.onInstalled.addListener(function() {
     if (!items.secret) {
       SharedStorage.setSync({ secret: '' });
     }
-  });
-  // 创建右键菜单
-  chrome.contextMenus.create({
-    id: 'sendSelectedTextAsSms',
-    title: '发送选中文本为短信',
-    contexts: ['selection']
   });
   // 启动轮询
   initSmsPolling();
@@ -33,8 +27,64 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
     }
     // 异步保存选中文本（不阻塞侧边栏打开）
     SharedStorage.setLocal({ selectedText: info.selectionText });
+  } else if (info.menuItemId === 'fillPhoneNumber') {
+    fillPhoneFromContextMenu(info, tab);
   }
 });
+
+function ensureContextMenus() {
+  chrome.contextMenus.removeAll(() => {
+    chrome.contextMenus.create({
+      id: 'sendSelectedTextAsSms',
+      title: '发送选中文本为短信',
+      contexts: ['selection']
+    });
+    chrome.contextMenus.create({
+      id: 'fillPhoneNumber',
+      title: '填入手机号（自动匹配区号）',
+      contexts: ['editable']
+    });
+  });
+}
+
+// 解压扩展被手动“重新加载”时也立即刷新菜单，不依赖 onInstalled 是否触发。
+ensureContextMenus();
+
+// 清理旧 service worker 遗留的常驻短信通知，避免修复后旧弹窗仍停留在右下角。
+chrome.notifications.getAll((notifications) => {
+  Object.keys(notifications || {}).forEach((id) => {
+    if (id.indexOf('sms-notif-') === 0) chrome.notifications.clear(id);
+  });
+});
+
+async function fillPhoneFromContextMenu(info, tab) {
+  if (!tab || !tab.id) return;
+  try {
+    const settings = await SharedStorage.getSync([
+      'autoDetectPhone', 'phoneNumber', 'phoneCountryCode', 'apiConfigData'
+    ]);
+    const profile = settings.autoDetectPhone === false
+      ? SharedPhoneUtil.resolvePhoneProfile(null, null, settings.phoneNumber || '', settings.phoneCountryCode || '+86')
+      : SharedPhoneUtil.resolvePhoneProfile(null, settings.apiConfigData, settings.phoneNumber || '', settings.phoneCountryCode || '+86');
+
+    if (!profile) {
+      chrome.notifications.create({
+        type: 'basic',
+        iconUrl: chrome.runtime.getURL('images/icon48.png'),
+        title: '没有可用的手机号',
+        message: '请在扩展设置中刷新 SIM 信息，或填写备用手机号。'
+      });
+      return;
+    }
+
+    await chrome.tabs.sendMessage(tab.id, {
+      type: 'SMS_FILL_PHONE_FROM_CONTEXT_MENU',
+      profile
+    }, { frameId: Number.isInteger(info.frameId) ? info.frameId : 0 });
+  } catch (e) {
+    logError(`[FillPhone] 右键填入失败: ${e && e.message ? e.message : String(e)}`);
+  }
+}
 
 // 点击扩展图标时打开侧边栏（直接调用，避免异步破坏用户手势）
 chrome.action.onClicked.addListener((tab) => {
@@ -68,6 +118,7 @@ chrome.action.onClicked.addListener((tab) => {
 
   let pollIntervalId = null;
   let retryTimerId = null;
+  let pollInFlight = false;
   let consecutiveErrors = 0;
   let currentRetryDelay = POLL_INTERVAL_MS; // 初始与正常轮询间隔一致
 
@@ -82,6 +133,8 @@ chrome.action.onClicked.addListener((tab) => {
   }
 
   async function pollLatestSms() {
+    if (pollInFlight) return;
+    pollInFlight = true;
     try {
       // 拉取配置
       const cfg = await SharedStorage.getSync(['serverUrl', 'secret']);
@@ -135,16 +188,22 @@ chrome.action.onClicked.addListener((tab) => {
           pollLatestSms();
         }, currentRetryDelay);
       }
+    } finally {
+      pollInFlight = false;
     }
   }
 
   async function mergeAndStoreSmsList(newList) {
     // 读取现有列表
-    const local = await SharedStorage.getLocal(['polledSmsList']);
+    const local = await SharedStorage.getLocal(['polledSmsList', 'smsPollingInitialized', 'seenSmsKeys']);
     const existing = Array.isArray(local.polledSmsList) ? local.polledSmsList : [];
+    const isInitialSnapshot = local.smsPollingInitialized !== true && !Array.isArray(local.polledSmsList);
 
     // 先记录现有键集合，用于检测新增短信（不考虑顺序变化）
-    const existingKeySet = new Set(existing.map(item => getSmsKey(item)));
+    const existingKeySet = new Set([
+      ...(Array.isArray(local.seenSmsKeys) ? local.seenSmsKeys : []),
+      ...existing.map(item => getSmsKey(item))
+    ]);
 
     // 使用 Map 进行严格去重，优先使用服务端 id；否则用复合键
     const map = new Map();
@@ -168,6 +227,10 @@ chrome.action.onClicked.addListener((tab) => {
         newItems.push(sms);
       }
     }
+    const seenSmsKeys = Array.from(new Set([
+      ...existingKeySet,
+      ...newList.map(item => getSmsKey(item))
+    ])).slice(-200);
 
     // 排序（按时间戳降序）并进行容量管理
     let merged = Array.from(map.values());
@@ -176,57 +239,66 @@ chrome.action.onClicked.addListener((tab) => {
       merged = merged.slice(0, MAX_SMS_LIST_SIZE);
     }
 
+    // 首次启用只建立基线，避免把服务端返回的最近20条旧短信全部通知并反复填入页面。
+    if (isInitialSnapshot) {
+      await SharedStorage.setLocal({ polledSmsList: merged, smsPollingInitialized: true, seenSmsKeys });
+      return addedCount > 0;
+    }
+
     // 仅在有新增短信时触发通知与写入存储
     if (addedCount > 0) {
       // 读取自动填充设置
-      const settings = await SharedStorage.getSync(['autoFillCode', 'customCodePattern', 'autoFillPhone', 'phoneNumber', 'phoneCountryCode']);
+      const settings = await SharedStorage.getSync(['autoFillCode', 'customCodePattern']);
       const autoFillEnabled = settings.autoFillCode !== false; // 默认开启
       const customPattern = settings.customCodePattern || '';
-      const autoFillPhoneEnabled = settings.autoFillPhone !== false; // 默认开启
-      const phoneNumber = settings.phoneNumber || '';
-      const phoneCountryCode = settings.phoneCountryCode || '+86';
 
-      // 提取验证码并触发通知（逐条）
+      // 先按时间倒序处理，自动填充只使用最新一条，避免一次轮询到多条短信时互相覆盖。
       try {
-        await Promise.all(newItems.map(async (item) => {
+        const processed = newItems.filter(isRecentSms).map((item) => {
           const code = SharedCodeUtil.extractVerificationCode(item.content, customPattern);
           if (code) {
             item.extractedCode = code;
             logError(`[CodeExtract] 成功提取验证码: ${code} (来源: ${item.number || item.from || '未知'})`);
-            if (autoFillEnabled) {
-              tryAutoFillCode(code, item);
-            }
           } else {
             logError(`[CodeExtract] 未能提取验证码，内容: ${(item.content || '').substring(0, 100)}`);
           }
-          // 如果启用了手机号自动填充且有手机号，尝试填充
-          if (autoFillPhoneEnabled && phoneNumber) {
-            tryAutoFillPhone(phoneNumber, phoneCountryCode);
-          }
-          await notifyNewSms(item, code);
-        }));
+          return { item, code };
+        }).sort((a, b) => {
+          const aTime = Number(a.item.timestamp ?? a.item.date ?? a.item.time) || 0;
+          const bTime = Number(b.item.timestamp ?? b.item.date ?? b.item.time) || 0;
+          return bTime - aTime;
+        });
+
+        const target = processed.find(entry => entry.code) || processed[0];
+        if (target && autoFillEnabled && target.code) {
+          tryAutoFillContext(target.code);
+        }
+        // 系统通知只用于验证码。营销、积分、账单等普通短信仍保存在侧边栏，
+        // 但不创建右下角通知，避免数据源字段变化时反复打扰用户。
+        await Promise.all(processed
+          .filter(entry => !!entry.code)
+          .map(entry => notifyNewSms(entry.item, entry.code)));
       } catch (e) {
         logError(`[Notify] 通知发送失败: ${e && e.message ? e.message : String(e)}`);
       }
 
       // 写入本地存储
-      await SharedStorage.setLocal({ polledSmsList: merged });
+      await SharedStorage.setLocal({ polledSmsList: merged, smsPollingInitialized: true, seenSmsKeys });
     }
 
     return addedCount > 0;
   }
 
   function getSmsKey(sms) {
-    // 使用 number + 时间戳 + content 生成唯一键，时间戳兼容 date/time/timestamp
-    const numberVal = sms && sms.number != null ? String(sms.number) : '';
-    const tsRaw = (sms && (sms.timestamp ?? sms.date ?? sms.time)) ?? 0;
-    const tsVal = typeof tsRaw === 'number' ? tsRaw : Number(tsRaw) || 0;
-    const contentVal = sms && sms.content != null ? String(sms.content) : '';
-    return `${numberVal}|${tsVal}|${contentVal}`;
+    return SharedSmsUtil.getSmsKey(sms);
+  }
+
+  function isRecentSms(sms) {
+    return SharedSmsUtil.isRecentSms(sms);
   }
 
   function normalizeSmsItem(sms) {
-    const timeVal = sms && (sms.date || sms.time || 0);
+    const timeVal = sms && (sms.timestamp ?? sms.date ?? sms.time ?? 0);
     const timestamp = typeof timeVal === 'number' ? timeVal : Number(timeVal) || 0;
     return {
       ...sms,
@@ -347,7 +419,7 @@ chrome.action.onClicked.addListener((tab) => {
       title,
       message,
       contextMessage: code ? '已尝试自动填入验证码' : '来源: SmsForwarder',
-      requireInteraction: true,
+      requireInteraction: !!code,
       isClickable: true,
       priority: 2,
       buttons
@@ -482,549 +554,43 @@ chrome.action.onClicked.addListener((tab) => {
     });
   }
 
-  // --------------------------- 验证码自动填充模块 ---------------------------
+  // --------------------------- 页面自动填充消息 ---------------------------
 
-  function tryAutoFillCode(code, sms) {
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      const tab = tabs && tabs[0];
-      if (!tab || !tab.id) {
-        logError(`[AutoFill] 无活动标签页，验证码 ${code} 未填入`);
-        return;
-      }
-
-      // 注入到所有框架（含 iframe），提高验证码输入框命中率
-      chrome.scripting.executeScript({
-        target: { tabId: tab.id, allFrames: true },
-        args: [code],
-        func: fillCodeInPage
-      }).then((results) => {
-        let filled = false;
-        if (results) {
-          for (const r of results) {
-            if (r && r.result === true) { filled = true; break; }
-          }
-        }
-        if (filled) {
-          logError(`[AutoFill] 验证码 ${code} 已自动填入页面 (tab=${tab.id})`);
-        } else {
-          logError(`[AutoFill] 未找到验证码输入框，验证码 ${code} 未填入 (tab=${tab.id}, url=${tab.url || ''})`);
-        }
-      }).catch((e) => {
-        logError(`[AutoFill] 注入失败: ${e && e.message ? e.message : String(e)}`);
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (!message || message.type !== 'GET_SMS_AUTOFILL_CONTEXT') return undefined;
+    (async () => {
+      const settings = await SharedStorage.getSync([
+        'autoFillCode'
+      ]);
+      sendResponse({
+        autoFillCode: settings.autoFillCode !== false
       });
-    });
-  }
-
-  // 此函数会被注入到页面中执行，不能引用外部变量
-  function fillCodeInPage(code) {
-    var KEYWORDS = [
-      'code', 'verify', 'verification', 'captcha', 'otp', 'pin',
-      'authcode', 'auth-code', 'auth_code', 'security', 'token', 'sms',
-      '验证码', '验证', '动态码', '校验码', '安全码', '认证码', '确认码', '短信码'
-    ];
-    var SKIP_TYPES = ['password','submit','button','checkbox','radio','file','hidden','range','color','image','reset','email','url','date','time','datetime-local','month','week'];
-
-    function isVisible(el) {
-      if (!el || !el.getClientRects) return false;
-      var rects = el.getClientRects();
-      if (!rects.length) return false;
-      var style = window.getComputedStyle(el);
-      if (style.display === 'none' || style.visibility === 'hidden') return false;
-      if (parseFloat(style.opacity) === 0) return false;
-      return true;
-    }
-
-    function findAssociatedLabel(inp) {
-      if (inp.id) {
-        var label = document.querySelector('label[for="' + CSS.escape(inp.id) + '"]');
-        if (label) return label.textContent || '';
-      }
-      var parent = inp.parentElement;
-      while (parent) {
-        if (parent.tagName === 'LABEL') return parent.textContent || '';
-        parent = parent.parentElement;
-      }
-      var labelledBy = inp.getAttribute('aria-labelledby');
-      if (labelledBy) {
-        var labelEl = document.getElementById(labelledBy);
-        if (labelEl) return labelEl.textContent || '';
-      }
-      return '';
-    }
-
-    function scoreInput(inp) {
-      var score = 0;
-      var attrs = [
-        inp.id || '', inp.name || '', inp.placeholder || '',
-        inp.getAttribute('aria-label') || '', inp.getAttribute('autocomplete') || ''
-      ].join(' ').toLowerCase();
-
-      // autocomplete="one-time-code" 是最强信号
-      if ((inp.getAttribute('autocomplete') || '').toLowerCase() === 'one-time-code') { score += 10; }
-
-      for (var i = 0; i < KEYWORDS.length; i++) {
-        if (attrs.indexOf(KEYWORDS[i].toLowerCase()) >= 0) { score += 3; break; }
-      }
-
-      var maxLen = parseInt(inp.getAttribute('maxlength') || '0', 10);
-      if (maxLen >= 4 && maxLen <= 8) score += 2;
-
-      var inputMode = inp.getAttribute('inputmode') || '';
-      var type = (inp.type || 'text').toLowerCase();
-      if (inputMode === 'numeric' || inputMode === 'digits' || type === 'tel' || type === 'number') score += 1;
-
-      var labelText = findAssociatedLabel(inp).toLowerCase();
-      for (var i2 = 0; i2 < KEYWORDS.length; i2++) {
-        if (labelText.indexOf(KEYWORDS[i2].toLowerCase()) >= 0) { score += 3; break; }
-      }
-
-      // 检查附近文本（父元素及祖父元素）
-      var parentText = '';
-      var p = inp.parentElement;
-      if (p) parentText = (p.textContent || '').toLowerCase().substring(0, 300);
-      for (var i3 = 0; i3 < KEYWORDS.length; i3++) {
-        if (parentText.indexOf(KEYWORDS[i3].toLowerCase()) >= 0) { score += 1; break; }
-      }
-
-      // 空值加分（更可能是目标输入框）
-      if (!inp.value) score += 1;
-
-      return score;
-    }
-
-    function findCodeInput() {
-      // 策略1: autocomplete="one-time-code"
-      var input = document.querySelector('input[autocomplete="one-time-code"]');
-      if (input && isVisible(input) && !input.disabled && !input.readOnly) return input;
-
-      // 策略2: 评分检测所有文本类输入框
-      var inputs = Array.from(document.querySelectorAll('input'));
-      var best = null;
-      var bestScore = 0;
-      for (var i = 0; i < inputs.length; i++) {
-        var inp = inputs[i];
-        if (!isVisible(inp) || inp.disabled || inp.readOnly) continue;
-        var type = (inp.type || 'text').toLowerCase();
-        if (SKIP_TYPES.indexOf(type) >= 0) continue;
-        var s = scoreInput(inp);
-        if (s > bestScore) { bestScore = s; best = inp; }
-      }
-      return bestScore >= 2 ? best : null;
-    }
-
-    function flashBorder(el) {
-      var orig = {
-        border: el.style.border,
-        boxShadow: el.style.boxShadow,
-        transition: el.style.transition,
-        outline: el.style.outline
-      };
-      el.style.transition = 'border 0.3s ease, box-shadow 0.3s ease, outline 0.3s ease';
-      el.style.border = '2px solid #28a745';
-      el.style.boxShadow = '0 0 0 3px rgba(40, 167, 69, 0.3)';
-      el.style.outline = 'none';
-      setTimeout(function() {
-        el.style.border = orig.border;
-        el.style.boxShadow = orig.boxShadow;
-        el.style.transition = orig.transition;
-        el.style.outline = orig.outline;
-      }, 1500);
-    }
-
-    function setNativeValue(el, value) {
-      // React _valueTracker trick: React 16+ 使用 ValueTracker 跟踪值变化，
-      // 如果不重置 tracker，dispatchEvent('input') 会被 React 忽略（认为值没变）
-      var tracker = el._valueTracker;
-      if (tracker) {
-        tracker.setValue('');
-      }
-      var descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
-      if (descriptor && descriptor.set) {
-        descriptor.set.call(el, value);
-      } else {
-        el.value = value;
-      }
-    }
-
-    function triggerEvents(el, val) {
-      // 使用 InputEvent 提供更好的框架兼容性
-      try {
-        el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: val }));
-      } catch (_) {
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-      }
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      // 部分框架监听键盘事件
-      try {
-        el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
-      } catch (_) {}
-    }
-
-    function doFill(inp) {
-      // 截断到 maxlength
-      var maxLen = parseInt(inp.getAttribute('maxlength') || '0', 10);
-      var fillValue = (maxLen > 0 && code.length > maxLen) ? code.substring(0, maxLen) : code;
-
-      inp.focus();
-      setNativeValue(inp, fillValue);
-      triggerEvents(inp, fillValue);
-
-      // 验证值是否生效；未生效则重试
-      if (inp.value !== fillValue) {
-        setNativeValue(inp, fillValue);
-        try {
-          inp.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: fillValue }));
-        } catch(_) {
-          inp.dispatchEvent(new Event('input', { bubbles: true }));
-        }
-        inp.dispatchEvent(new Event('change', { bubbles: true }));
-      }
-
-      // 最后兜底：直接赋值
-      if (inp.value !== fillValue) {
-        inp.value = fillValue;
-        inp.dispatchEvent(new Event('input', { bubbles: true }));
-        inp.dispatchEvent(new Event('change', { bubbles: true }));
-      }
-
-      flashBorder(inp);
-      return inp.value === fillValue;
-    }
-
-    var input = findCodeInput();
-    if (!input) return false;
-
-    var ok = doFill(input);
-
-    // 框架可能在重渲染后重置值，延迟重试一次
-    if (!ok) {
-      setTimeout(function() {
-        try { doFill(input); } catch(_) {}
-      }, 200);
-    }
-
+    })().catch(() => sendResponse(null));
     return true;
-  }
+  });
 
-  // --------------------------- 手机号自动填充模块 ---------------------------
-
-  function tryAutoFillPhone(phoneNumber, countryCode) {
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+  function tryAutoFillContext(code) {
+    chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
       const tab = tabs && tabs[0];
-      if (!tab || !tab.id) {
-        logError(`[AutoFillPhone] 无活动标签页，手机号未填入`);
-        return;
-      }
-
-      chrome.scripting.executeScript({
-        target: { tabId: tab.id, allFrames: true },
-        args: [phoneNumber, countryCode],
-        func: fillPhoneInPage
-      }).then((results) => {
-        let filled = false;
-        let dropdownSet = false;
-        if (results) {
-          for (const r of results) {
-            if (r && r.result) {
-              if (r.result.filled) filled = true;
-              if (r.result.dropdownSet) dropdownSet = true;
-            }
-          }
-        }
-        if (filled || dropdownSet) {
-          logError(`[AutoFillPhone] 手机号${filled ? '已填入' : '未填入'}${dropdownSet ? '，区号已设置' : ''} (tab=${tab.id})`);
-        } else {
-          logError(`[AutoFillPhone] 未找到手机号输入框 (tab=${tab.id}, url=${tab.url || ''})`);
-        }
-      }).catch((e) => {
-        logError(`[AutoFillPhone] 注入失败: ${e && e.message ? e.message : String(e)}`);
-      });
-    });
-  }
-
-  // 此函数会被注入到页面中执行，不能引用外部变量
-  function fillPhoneInPage(phoneNumber, countryCode) {
-    var PHONE_KEYWORDS = [
-      'phone', 'mobile', 'tel', 'telephone', 'cellphone',
-      '手机', '电话', '号码', '手机号', '手机号码', '联系号码', '联系电话'
-    ];
-    var SKIP_TYPES = ['password','submit','button','checkbox','radio','file','hidden','range','color','image','reset','email','url','date','time','datetime-local','month','week','search'];
-
-    function isVisible(el) {
-      if (!el || !el.getClientRects) return false;
-      var rects = el.getClientRects();
-      if (!rects.length) return false;
-      var style = window.getComputedStyle(el);
-      if (style.display === 'none' || style.visibility === 'hidden') return false;
-      if (parseFloat(style.opacity) === 0) return false;
-      return true;
-    }
-
-    function findAssociatedLabel(inp) {
-      if (inp.id) {
-        var label = document.querySelector('label[for="' + CSS.escape(inp.id) + '"]');
-        if (label) return label.textContent || '';
-      }
-      var parent = inp.parentElement;
-      while (parent) {
-        if (parent.tagName === 'LABEL') return parent.textContent || '';
-        parent = parent.parentElement;
-      }
-      var labelledBy = inp.getAttribute('aria-labelledby');
-      if (labelledBy) {
-        var labelEl = document.getElementById(labelledBy);
-        if (labelEl) return labelEl.textContent || '';
-      }
-      return '';
-    }
-
-    function scorePhoneInput(inp) {
-      var score = 0;
-      var attrs = [
-        inp.id || '', inp.name || '', inp.placeholder || '',
-        inp.getAttribute('aria-label') || '', inp.getAttribute('autocomplete') || ''
-      ].join(' ').toLowerCase();
-
-      // autocomplete="tel" 是最强信号
-      if ((inp.getAttribute('autocomplete') || '').toLowerCase() === 'tel') score += 10;
-      if ((inp.getAttribute('autocomplete') || '').toLowerCase() === 'tel-national') score += 10;
-
-      for (var i = 0; i < PHONE_KEYWORDS.length; i++) {
-        if (attrs.indexOf(PHONE_KEYWORDS[i].toLowerCase()) >= 0) { score += 3; break; }
-      }
-
-      var type = (inp.type || 'text').toLowerCase();
-      if (type === 'tel') score += 3;
-
-      var maxLen = parseInt(inp.getAttribute('maxlength') || '0', 10);
-      if (maxLen === 11) score += 3; // 中国手机号正好11位
-      else if (maxLen >= 10 && maxLen <= 13) score += 1;
-
-      var inputMode = inp.getAttribute('inputmode') || '';
-      if (inputMode === 'numeric' || inputMode === 'tel') score += 1;
-
-      var labelText = findAssociatedLabel(inp).toLowerCase();
-      for (var i2 = 0; i2 < PHONE_KEYWORDS.length; i2++) {
-        if (labelText.indexOf(PHONE_KEYWORDS[i2].toLowerCase()) >= 0) { score += 3; break; }
-      }
-
-      // 检查附近文本
-      var parentText = '';
-      var p = inp.parentElement;
-      if (p) parentText = (p.textContent || '').toLowerCase().substring(0, 300);
-      for (var i3 = 0; i3 < PHONE_KEYWORDS.length; i3++) {
-        if (parentText.indexOf(PHONE_KEYWORDS[i3].toLowerCase()) >= 0) { score += 1; break; }
-      }
-
-      // 空值加分
-      if (!inp.value) score += 2;
-
-      // 排除验证码类输入框
-      var codeKeywords = ['code', 'verify', 'verification', 'captcha', 'otp', 'pin', '验证码', '校验码', '动态码'];
-      for (var ci = 0; ci < codeKeywords.length; ci++) {
-        if (attrs.indexOf(codeKeywords[ci].toLowerCase()) >= 0) { score -= 5; break; }
-        if (labelText.indexOf(codeKeywords[ci].toLowerCase()) >= 0) { score -= 5; break; }
-      }
-
-      return score;
-    }
-
-    function findPhoneInput() {
-      // 策略1: autocomplete="tel" 或 "tel-national"
-      var input = document.querySelector('input[autocomplete="tel"], input[autocomplete="tel-national"]');
-      if (input && isVisible(input) && !input.disabled && !input.readOnly && !input.value) return input;
-
-      // 策略2: type="tel"
-      var telInputs = document.querySelectorAll('input[type="tel"]');
-      for (var t = 0; t < telInputs.length; t++) {
-        if (isVisible(telInputs[t]) && !telInputs[t].disabled && !telInputs[t].readOnly && !telInputs[t].value) return telInputs[t];
-      }
-
-      // 策略3: 评分检测所有输入框
-      var inputs = Array.from(document.querySelectorAll('input'));
-      var best = null;
-      var bestScore = 0;
-      for (var i = 0; i < inputs.length; i++) {
-        var inp = inputs[i];
-        if (!isVisible(inp) || inp.disabled || inp.readOnly) continue;
-        var type = (inp.type || 'text').toLowerCase();
-        if (SKIP_TYPES.indexOf(type) >= 0) continue;
-        if (inp.value) continue; // 跳过已有值的输入框
-        var s = scorePhoneInput(inp);
-        if (s > bestScore) { bestScore = s; best = inp; }
-      }
-      return bestScore >= 3 ? best : null;
-    }
-
-    function setNativeValue(el, value) {
-      // React _valueTracker trick
-      var tracker = el._valueTracker;
-      if (tracker) {
-        tracker.setValue('');
-      }
-      var descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
-      if (descriptor && descriptor.set) {
-        descriptor.set.call(el, value);
-      } else {
-        el.value = value;
-      }
-    }
-
-    function triggerEvents(el, val) {
-      try {
-        el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: val }));
-      } catch (_) {
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-      }
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      try {
-        el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
-      } catch (_) {}
-    }
-
-    function flashBorder(el) {
-      var orig = {
-        border: el.style.border,
-        boxShadow: el.style.boxShadow,
-        transition: el.style.transition,
-        outline: el.style.outline
+      if (!tab || !tab.id) return;
+      const payload = {
+        type: 'SMS_AUTOFILL',
+        code: code || '',
+        autoFillCode: true
       };
-      el.style.transition = 'border 0.3s ease, box-shadow 0.3s ease, outline 0.3s ease';
-      el.style.border = '2px solid #4285f4';
-      el.style.boxShadow = '0 0 0 3px rgba(66, 133, 244, 0.3)';
-      el.style.outline = 'none';
-      setTimeout(function() {
-        el.style.border = orig.border;
-        el.style.boxShadow = orig.boxShadow;
-        el.style.transition = orig.transition;
-        el.style.outline = orig.outline;
-      }, 1500);
-    }
-
-    // 检测并设置区号下拉框
-    function trySetCountryCodeDropdown(countryCode) {
-      var cc = countryCode || '+86';
-      var ccDigits = cc.replace(/\+/g, ''); // "86"
-
-      // 策略1: 原生 select 元素
-      var selects = document.querySelectorAll('select');
-      for (var s = 0; s < selects.length; s++) {
-        var sel = selects[s];
-        if (!isVisible(sel)) continue;
-        var options = sel.querySelectorAll('option');
-        var bestIdx = -1;
-        var bestScore = -1;
-        for (var o = 0; o < options.length; o++) {
-          var optText = (options[o].textContent || '').toLowerCase();
-          var optVal = (options[o].value || '').toLowerCase();
-          var sc = -1;
-          // 精确匹配 +86 或 86
-          if (optText.indexOf(cc.toLowerCase()) >= 0 || optVal.indexOf(cc.toLowerCase()) >= 0) sc = 10;
-          else if (optText.indexOf(ccDigits) >= 0 || optVal.indexOf(ccDigits) >= 0) sc = 8;
-          // 匹配 China/中国/CN
-          else if (optText.indexOf('china') >= 0 || optText.indexOf('中国') >= 0 || optText.indexOf('cn') >= 0) sc = 5;
-          if (sc > bestScore) { bestScore = sc; bestIdx = o; }
-        }
-        if (bestIdx >= 0 && bestScore >= 5) {
-          // 检查这个 select 是否像区号选择器（选项中有+号或国家名）
-          var selectLooksLikeCC = false;
-          for (var o2 = 0; o2 < options.length; o2++) {
-            var t = (options[o2].textContent || '');
-            if (t.indexOf('+') >= 0 || t.indexOf('中国') >= 0 || t.toLowerCase().indexOf('china') >= 0) {
-              selectLooksLikeCC = true;
-              break;
-            }
-          }
-          if (selectLooksLikeCC) {
-            sel.selectedIndex = bestIdx;
-            sel.dispatchEvent(new Event('change', { bubbles: true }));
-            return true;
-          }
-        }
-      }
-
-      // 策略2: 自定义下拉框（div/button/span 类组件）
-      // 查找包含 "+86" 或中国国旗的可点击元素
-      var clickableSelectors = 'div[role="combobox"], div[role="listbox"], div[class*="country"], div[class*="select"], button[class*="country"], span[class*="country"], div[tabindex]';
-      var clickables = document.querySelectorAll(clickableSelectors);
-      for (var c = 0; c < clickables.length; c++) {
-        var el = clickables[c];
-        if (!isVisible(el)) continue;
-        var text = (el.textContent || '').trim();
-        if (text.indexOf(cc) >= 0 || text.indexOf('+86') >= 0 || text.indexOf('中国') >= 0) {
-          // 如果文本已经显示 +86，可能已经选中了
-          if (text.indexOf(cc) >= 0 && text.length < 20) return true;
-          // 否则点击展开下拉框
-          try {
-            el.click();
-            // 等待下拉选项出现后点击对应项
-            setTimeout(function() {
-              var items = document.querySelectorAll('div[role="option"], li[role="option"], div[class*="option"], li[class*="option"]');
-              for (var ii = 0; ii < items.length; ii++) {
-                var itemText = (items[ii].textContent || '').toLowerCase();
-                if (itemText.indexOf(cc.toLowerCase()) >= 0 || itemText.indexOf('中国') >= 0 || itemText.indexOf('china') >= 0) {
-                  items[ii].click();
-                  break;
-                }
-              }
-            }, 300);
-            return true;
-          } catch(_) {}
-        }
-      }
-
-      return false;
-    }
-
-    // 清理手机号：只保留数字
-    var cleanPhone = phoneNumber.replace(/\D/g, '');
-    // 如果以86开头且是13位，去掉86前缀
-    if (cleanPhone.length === 13 && cleanPhone.indexOf('86') === 0) {
-      cleanPhone = cleanPhone.substring(2);
-    }
-
-    var result = { filled: false, dropdownSet: false };
-
-    // 先尝试设置区号下拉框
-    result.dropdownSet = trySetCountryCodeDropdown(countryCode);
-
-    // 查找并填充手机号输入框
-    var input = findPhoneInput();
-    if (input) {
-      input.focus();
-      setNativeValue(input, cleanPhone);
-      triggerEvents(input, cleanPhone);
-
-      // 验证值是否生效
-      if (input.value !== cleanPhone) {
-        setNativeValue(input, cleanPhone);
+      try {
+        await chrome.tabs.sendMessage(tab.id, payload);
+      } catch (firstError) {
+        // 扩展刚更新时，已打开的标签页还没有 content script；注入一次后重试。
         try {
-          input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: cleanPhone }));
-        } catch(_) {
-          input.dispatchEvent(new Event('input', { bubbles: true }));
+          await chrome.scripting.executeScript({
+            target: { tabId: tab.id, allFrames: true },
+            files: ['shared/phoneutil.js', 'content/autofill.js']
+          });
+          await chrome.tabs.sendMessage(tab.id, payload);
+        } catch (e) {
+          logError(`[AutoFill] 页面消息发送失败: ${e && e.message ? e.message : String(e)}`);
         }
-        input.dispatchEvent(new Event('change', { bubbles: true }));
       }
-      if (input.value !== cleanPhone) {
-        input.value = cleanPhone;
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        input.dispatchEvent(new Event('change', { bubbles: true }));
-      }
-
-      flashBorder(input);
-      result.filled = input.value === cleanPhone;
-
-      // 延迟重试
-      if (!result.filled) {
-        setTimeout(function() {
-          try {
-            setNativeValue(input, cleanPhone);
-            triggerEvents(input, cleanPhone);
-            flashBorder(input);
-          } catch(_) {}
-        }, 200);
-      }
-    }
-
-    return result;
+    });
   }
