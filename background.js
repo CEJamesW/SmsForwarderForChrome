@@ -106,7 +106,7 @@ chrome.action.onClicked.addListener((tab) => {
   const MAX_SMS_LIST_SIZE = 20;  // 本地保存最多20条
   const DEFAULT_SMS_TYPE = 1;    // 默认轮询接收短信
   const DISCOVERY_PORT = 5000;
-  const DISCOVERY_TIMEOUT_MS = 900;
+  const DISCOVERY_TIMEOUT_MS = 2500;
   const DISCOVERY_CONCURRENCY = 32;
   const DISCOVERY_COOLDOWN_MS = 2 * 60 * 1000;
 
@@ -115,6 +115,8 @@ chrome.action.onClicked.addListener((tab) => {
   let pollInFlight = false;
   let discoveryInFlight = null;
   let lastDiscoveryAt = 0;
+  let lastDiscoveryNetworks = [];
+  let lastDiscoveryCandidateCount = 0;
   let consecutiveErrors = 0;
   let currentRetryDelay = POLL_INTERVAL_MS; // 初始与正常轮询间隔一致
 
@@ -147,6 +149,7 @@ chrome.action.onClicked.addListener((tab) => {
       ownAddresses.add(item.address);
       prefixes.add(item.address.split('.').slice(0, 3).join('.'));
     });
+    lastDiscoveryNetworks = Array.from(prefixes).slice(0, 4).map(prefix => `${prefix}.0/24`);
     const candidates = [];
     Array.from(prefixes).slice(0, 4).forEach((prefix) => {
       for (let host = 1; host <= 254; host++) {
@@ -154,6 +157,7 @@ chrome.action.onClicked.addListener((tab) => {
         if (!ownAddresses.has(address)) candidates.push(`http://${address}:${DISCOVERY_PORT}`);
       }
     });
+    lastDiscoveryCandidateCount = candidates.length;
     return candidates;
   }
 
@@ -643,8 +647,18 @@ chrome.action.onClicked.addListener((tab) => {
     if (!message) return undefined;
     if (message.type === 'SMS_DISCOVER_SERVER') {
       discoverSmsForwarder(message.secret || '', message.preferredUrl || '')
-        .then(serverUrl => sendResponse({ ok: !!serverUrl, serverUrl }))
-        .catch(() => sendResponse({ ok: false, serverUrl: null }));
+        .then(serverUrl => sendResponse({
+          ok: !!serverUrl,
+          serverUrl,
+          networks: lastDiscoveryNetworks,
+          candidateCount: lastDiscoveryCandidateCount
+        }))
+        .catch(() => sendResponse({
+          ok: false,
+          serverUrl: null,
+          networks: lastDiscoveryNetworks,
+          candidateCount: lastDiscoveryCandidateCount
+        }));
       return true;
     }
     if (message.type !== 'GET_SMS_AUTOFILL_CONTEXT') return undefined;

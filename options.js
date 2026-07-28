@@ -174,8 +174,8 @@ document.addEventListener('DOMContentLoaded', function() {
       fetchApiConfig(serverUrl, secret);
       return;
     }
-    await new Promise((resolve) => chrome.storage.sync.set({ connectionMode: mode, secret: secret, serverUrl: '' }, resolve));
-    discoverAndLoad(secret, '');
+    await new Promise((resolve) => chrome.storage.sync.set({ connectionMode: mode, secret: secret }, resolve));
+    discoverAndLoad(secret, serverUrl);
   }
 
   function updateConnectionMode() {
@@ -201,7 +201,10 @@ document.addEventListener('DOMContentLoaded', function() {
         }, (response) => resolve(chrome.runtime.lastError ? null : response));
       });
       if (!result || !result.ok || !result.serverUrl) {
-        throw new Error('未找到口令匹配的手机');
+        const networks = result && Array.isArray(result.networks) ? result.networks.join('、') : '';
+        const count = result && Number(result.candidateCount) ? result.candidateCount : 0;
+        const detail = networks ? `已扫描 ${networks}（${count} 个地址）` : '未获取到私有 IPv4 网段';
+        throw new Error(`未找到口令匹配的手机；${detail}`);
       }
       await new Promise((resolve) => chrome.storage.sync.set({ connectionMode: 'discover', secret: secret, serverUrl: result.serverUrl }, resolve));
       await fetchApiConfig(result.serverUrl, secret);
