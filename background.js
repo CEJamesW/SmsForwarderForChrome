@@ -140,7 +140,7 @@ chrome.action.onClicked.addListener((tab) => {
       (parts[0] === 192 && parts[1] === 168);
   }
 
-  async function getDiscoveryCandidates() {
+  async function getDiscoveryCandidates(fallbackAddresses) {
     const interfaces = await getNetworkInterfaces();
     const ownAddresses = new Set();
     const prefixes = new Set();
@@ -148,6 +148,11 @@ chrome.action.onClicked.addListener((tab) => {
       if (!isPrivateIpv4(item.address)) return;
       ownAddresses.add(item.address);
       prefixes.add(item.address.split('.').slice(0, 3).join('.'));
+    });
+    (Array.isArray(fallbackAddresses) ? fallbackAddresses : []).forEach((address) => {
+      if (!isPrivateIpv4(address)) return;
+      ownAddresses.add(address);
+      prefixes.add(address.split('.').slice(0, 3).join('.'));
     });
     lastDiscoveryNetworks = Array.from(prefixes).slice(0, 4).map(prefix => `${prefix}.0/24`);
     const candidates = [];
@@ -181,13 +186,13 @@ chrome.action.onClicked.addListener((tab) => {
     }
   }
 
-  async function discoverSmsForwarder(secret, preferredUrl) {
+  async function discoverSmsForwarder(secret, preferredUrl, fallbackAddresses) {
     if (!secret) return null;
     if (discoveryInFlight) return discoveryInFlight;
     discoveryInFlight = (async () => {
       lastDiscoveryAt = Date.now();
       if (preferredUrl && await probeSmsForwarder(preferredUrl, secret)) return preferredUrl;
-      const candidates = await getDiscoveryCandidates();
+      const candidates = await getDiscoveryCandidates(fallbackAddresses);
       let cursor = 0;
       let found = null;
       const worker = async () => {
@@ -646,7 +651,7 @@ chrome.action.onClicked.addListener((tab) => {
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!message) return undefined;
     if (message.type === 'SMS_DISCOVER_SERVER') {
-      discoverSmsForwarder(message.secret || '', message.preferredUrl || '')
+      discoverSmsForwarder(message.secret || '', message.preferredUrl || '', message.localAddresses || [])
         .then(serverUrl => sendResponse({
           ok: !!serverUrl,
           serverUrl,

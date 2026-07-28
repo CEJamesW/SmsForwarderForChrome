@@ -193,11 +193,13 @@ document.addEventListener('DOMContentLoaded', function() {
       showStatus('正在局域网内查找手机...', 'info');
       loadingDiv.style.display = 'block';
       apiConfigTable.style.display = 'none';
+      const localAddresses = await getLocalIpv4Addresses();
       const result = await new Promise((resolve) => {
         chrome.runtime.sendMessage({
           type: 'SMS_DISCOVER_SERVER',
           secret: secret,
-          preferredUrl: preferredUrl
+          preferredUrl: preferredUrl,
+          localAddresses: localAddresses
         }, (response) => resolve(chrome.runtime.lastError ? null : response));
       });
       if (!result || !result.ok || !result.serverUrl) {
@@ -214,6 +216,51 @@ document.addEventListener('DOMContentLoaded', function() {
     } finally {
       loadingDiv.style.display = 'none';
     }
+  }
+
+  function getLocalIpv4Addresses() {
+    return new Promise(async (resolve) => {
+      const addresses = new Set();
+      let peer = null;
+      let finished = false;
+      const addCandidates = (text) => {
+        const matches = String(text || '').match(/(?:\d{1,3}\.){3}\d{1,3}/g) || [];
+        matches.forEach((address) => {
+          const parts = address.split('.').map(Number);
+          const isPrivate = parts.length === 4 && (
+            parts[0] === 10 ||
+            (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) ||
+            (parts[0] === 192 && parts[1] === 168)
+          );
+          if (isPrivate) addresses.add(address);
+        });
+      };
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        if (peer) {
+          addCandidates(peer.localDescription && peer.localDescription.sdp);
+          peer.close();
+        }
+        resolve(Array.from(addresses));
+      };
+      try {
+        peer = new RTCPeerConnection({ iceServers: [] });
+        peer.createDataChannel('lan-discovery');
+        peer.onicecandidate = (event) => {
+          if (!event.candidate) {
+            finish();
+            return;
+          }
+          addCandidates(event.candidate.candidate);
+        };
+        const offer = await peer.createOffer();
+        await peer.setLocalDescription(offer);
+        window.setTimeout(finish, 1800);
+      } catch (_) {
+        finish();
+      }
+    });
   }
   
   // 从接口获取配置信息并显示
