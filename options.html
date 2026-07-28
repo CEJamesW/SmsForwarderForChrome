@@ -65,6 +65,28 @@
       gap: 10px;
       margin-bottom: 15px;
     }
+    .connection-mode {
+      display: inline-flex;
+      align-self: flex-start;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .connection-mode label {
+      padding: 9px 12px;
+      cursor: pointer;
+      font-weight: 600;
+      color: #374151;
+      background: #fff;
+    }
+    .connection-mode label + label {
+      border-left: 1px solid #d1d5db;
+    }
+    .connection-mode input {
+      width: auto;
+      margin: 0 6px 0 0;
+      accent-color: #4285f4;
+    }
     label {
       font-weight: 600;
       color: #444;
@@ -245,6 +267,16 @@
       input::placeholder {
         color: #9ca3af;
       }
+      .connection-mode {
+        border-color: #4b5563;
+      }
+      .connection-mode label {
+        color: #e5e7eb;
+        background: #182131;
+      }
+      .connection-mode label + label {
+        border-left-color: #4b5563;
+      }
       th {
         border-color: #4b5563;
       }
@@ -293,17 +325,26 @@
     <div class="left-panel">
       <h2 class="panel-title">配置</h2>
       <div class="form-group">
-        <label for="serverUrl">服务器URL:</label>
-        <input type="url" id="serverUrl" placeholder="例如: http://192.168.1.100:8080" />
+        <label>连接方式:</label>
+        <div class="connection-mode" role="radiogroup" aria-label="连接方式">
+          <label><input type="radio" name="connectionMode" value="manual" checked /> 固定地址</label>
+          <label><input type="radio" name="connectionMode" value="discover" /> 内网自动探测</label>
+        </div>
       </div>
-      
+      <div class="form-group" id="serverUrlGroup">
+        <label for="serverUrl">服务器地址:</label>
+        <input type="url" id="serverUrl" placeholder="例如: http://192.168.1.100:5000" />
+      </div>
       <div class="form-group">
-        <label for="secret">校验签名密钥:</label>
-        <input type="text" id="secret" placeholder="SmsForwarder中配置的签名密钥" />
+        <label for="secret">口令:</label>
+        <input type="password" id="secret" placeholder="SmsForwarder 主动控制服务端口令" autocomplete="off" />
+        <p id="discoverHelp" style="font-size: 13px; color: #666; margin: 0; display: none;">
+          保存后会自动在当前局域网查找手机，无需填写 IP 地址。
+        </p>
       </div>
       
       <div style="display: flex; gap: 10px;">
-        <button id="saveBtn">保存设置</button>
+        <button id="saveBtn">保存并查找手机</button>
         <button id="refreshBtn" title="刷新配置信息">刷新配置</button>
       </div>
       

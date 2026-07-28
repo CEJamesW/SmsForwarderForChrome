@@ -2,10 +2,7 @@ importScripts('shared/crypto.js', 'shared/api.js', 'shared/storage.js', 'shared/
 // 插件安装或更新时触发
 chrome.runtime.onInstalled.addListener(function() {
   // 初始化默认设置
-  SharedStorage.getSync(['serverUrl', 'secret']).then((items) => {
-    if (!items.serverUrl) {
-      SharedStorage.setSync({ serverUrl: '' });
-    }
+  SharedStorage.getSync(['secret']).then((items) => {
     if (!items.secret) {
       SharedStorage.setSync({ secret: '' });
     }
@@ -108,12 +105,106 @@ chrome.action.onClicked.addListener((tab) => {
   const POLL_INTERVAL_MS = 5000; // 5秒轮询
   const MAX_SMS_LIST_SIZE = 20;  // 本地保存最多20条
   const DEFAULT_SMS_TYPE = 1;    // 默认轮询接收短信
+  const DISCOVERY_PORT = 5000;
+  const DISCOVERY_TIMEOUT_MS = 900;
+  const DISCOVERY_CONCURRENCY = 32;
+  const DISCOVERY_COOLDOWN_MS = 2 * 60 * 1000;
 
   let pollIntervalId = null;
   let retryTimerId = null;
   let pollInFlight = false;
+  let discoveryInFlight = null;
+  let lastDiscoveryAt = 0;
   let consecutiveErrors = 0;
   let currentRetryDelay = POLL_INTERVAL_MS; // 初始与正常轮询间隔一致
+
+  function getNetworkInterfaces() {
+    return new Promise((resolve) => {
+      if (!chrome.system || !chrome.system.network) {
+        resolve([]);
+        return;
+      }
+      chrome.system.network.getNetworkInterfaces((interfaces) => {
+        resolve(chrome.runtime.lastError ? [] : (interfaces || []));
+      });
+    });
+  }
+
+  function isPrivateIpv4(address) {
+    const parts = String(address || '').split('.').map(Number);
+    if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) return false;
+    return parts[0] === 10 ||
+      (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) ||
+      (parts[0] === 192 && parts[1] === 168);
+  }
+
+  async function getDiscoveryCandidates() {
+    const interfaces = await getNetworkInterfaces();
+    const ownAddresses = new Set();
+    const prefixes = new Set();
+    interfaces.forEach((item) => {
+      if (!isPrivateIpv4(item.address)) return;
+      ownAddresses.add(item.address);
+      prefixes.add(item.address.split('.').slice(0, 3).join('.'));
+    });
+    const candidates = [];
+    Array.from(prefixes).slice(0, 4).forEach((prefix) => {
+      for (let host = 1; host <= 254; host++) {
+        const address = `${prefix}.${host}`;
+        if (!ownAddresses.has(address)) candidates.push(`http://${address}:${DISCOVERY_PORT}`);
+      }
+    });
+    return candidates;
+  }
+
+  async function probeSmsForwarder(serverUrl, secret) {
+    try {
+      const timestamp = Date.now().toString();
+      const sign = await SharedCrypto.generateSign(secret, timestamp);
+      const response = await fetch(`${serverUrl}/config/query`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({ timestamp: Number(timestamp), sign }),
+        signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
+        mode: 'cors',
+        credentials: 'same-origin'
+      });
+      if (!response.ok) return false;
+      const data = await response.json();
+      return data && (data.code === 200 || data.code === 0);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async function discoverSmsForwarder(secret, preferredUrl) {
+    if (!secret) return null;
+    if (discoveryInFlight) return discoveryInFlight;
+    discoveryInFlight = (async () => {
+      lastDiscoveryAt = Date.now();
+      if (preferredUrl && await probeSmsForwarder(preferredUrl, secret)) return preferredUrl;
+      const candidates = await getDiscoveryCandidates();
+      let cursor = 0;
+      let found = null;
+      const worker = async () => {
+        while (!found && cursor < candidates.length) {
+          const candidate = candidates[cursor++];
+          if (await probeSmsForwarder(candidate, secret)) found = candidate;
+        }
+      };
+      await Promise.all(Array.from(
+        { length: Math.min(DISCOVERY_CONCURRENCY, candidates.length) },
+        () => worker()
+      ));
+      if (found) await SharedStorage.setSync({ serverUrl: found, secret });
+      return found;
+    })();
+    try {
+      return await discoveryInFlight;
+    } finally {
+      discoveryInFlight = null;
+    }
+  }
 
   function initSmsPolling() {
     // 避免重复启动
@@ -130,15 +221,19 @@ chrome.action.onClicked.addListener((tab) => {
     pollInFlight = true;
     try {
       // 拉取配置
-      const cfg = await SharedStorage.getSync(['serverUrl', 'secret']);
+      const cfg = await SharedStorage.getSync(['connectionMode', 'serverUrl', 'secret']);
 
-      if (!cfg.serverUrl || !cfg.secret) {
-        logError('[Polling] serverUrl/secret 未配置，跳过本轮');
-        return; // 未配置则直接返回，不启动重试
+      if (!cfg.secret) {
+        logError('[Polling] 口令未配置，跳过本轮');
+        return;
       }
+      const autoDiscover = cfg.connectionMode === 'discover';
+      const shouldDiscover = autoDiscover && !cfg.serverUrl && Date.now() - lastDiscoveryAt >= DISCOVERY_COOLDOWN_MS;
+      const serverUrl = cfg.serverUrl || (shouldDiscover ? await discoverSmsForwarder(cfg.secret, '') : null);
+      if (!serverUrl) return;
 
       const resp = await SharedApi.signedPost(
-        cfg.serverUrl,
+        serverUrl,
         '/sms/query',
         cfg.secret,
         { type: DEFAULT_SMS_TYPE, page_num: 1, page_size: 20 }
@@ -172,6 +267,15 @@ chrome.action.onClicked.addListener((tab) => {
       // 记录错误并安排重试
       logError(`[Polling] 拉取失败: ${err && err.message ? err.message : String(err)}`);
       consecutiveErrors += 1;
+      const cfg = await SharedStorage.getSync(['connectionMode', 'serverUrl', 'secret']);
+      if (cfg.connectionMode === 'discover' && cfg.secret && consecutiveErrors >= 2 && Date.now() - lastDiscoveryAt >= DISCOVERY_COOLDOWN_MS) {
+        const discovered = await discoverSmsForwarder(cfg.secret, '');
+        if (discovered && discovered !== cfg.serverUrl) {
+          consecutiveErrors = 0;
+          setTimeout(pollLatestSms, 0);
+          return;
+        }
+      }
       const nextDelay = Math.min(currentRetryDelay * 2, 30000); // 最高30秒
       currentRetryDelay = nextDelay;
 
@@ -536,7 +640,14 @@ chrome.action.onClicked.addListener((tab) => {
   // --------------------------- 页面自动填充消息 ---------------------------
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (!message || message.type !== 'GET_SMS_AUTOFILL_CONTEXT') return undefined;
+    if (!message) return undefined;
+    if (message.type === 'SMS_DISCOVER_SERVER') {
+      discoverSmsForwarder(message.secret || '', message.preferredUrl || '')
+        .then(serverUrl => sendResponse({ ok: !!serverUrl, serverUrl }))
+        .catch(() => sendResponse({ ok: false, serverUrl: null }));
+      return true;
+    }
+    if (message.type !== 'GET_SMS_AUTOFILL_CONTEXT') return undefined;
     (async () => {
       const settings = await SharedStorage.getSync([
         'autoFillCode'

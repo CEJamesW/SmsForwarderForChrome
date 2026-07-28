@@ -13,6 +13,9 @@ document.addEventListener('DOMContentLoaded', function() {
   const autoDetectPhoneCheckbox = document.getElementById('autoDetectPhone');
   const phoneNumberInput = document.getElementById('phoneNumber');
   const savePhoneBtn = document.getElementById('savePhoneBtn');
+  const connectionModeInputs = Array.from(document.querySelectorAll('input[name="connectionMode"]'));
+  const serverUrlGroup = document.getElementById('serverUrlGroup');
+  const discoverHelp = document.getElementById('discoverHelp');
   
   // 加载保存的设置
   loadSettings();
@@ -33,15 +36,22 @@ document.addEventListener('DOMContentLoaded', function() {
   
   // 刷新按钮点击事件
   refreshBtn.addEventListener('click', function() {
-    // 获取当前保存的设置并刷新配置信息
-    chrome.storage.sync.get(['serverUrl', 'secret'], function(items) {
-      if (items.serverUrl && items.secret) {
+    chrome.storage.sync.get(['connectionMode', 'serverUrl', 'secret'], function(items) {
+      if (!items.secret) {
+        showStatus('请先输入并保存口令', 'error');
+        return;
+      }
+      if (items.connectionMode === 'discover') {
+        discoverAndLoad(items.secret, items.serverUrl || '');
+      } else if (items.serverUrl) {
         fetchApiConfig(items.serverUrl, items.secret);
       } else {
-        showStatus('请先保存服务器URL和签名密钥', 'error');
+        showStatus('请输入服务器地址', 'error');
       }
     });
   });
+
+  connectionModeInputs.forEach((input) => input.addEventListener('change', updateConnectionMode));
 
   // 保存验证码设置按钮
   saveCodeBtn.addEventListener('click', function() {
@@ -115,7 +125,10 @@ document.addEventListener('DOMContentLoaded', function() {
   
   // 加载设置函数
   function loadSettings() {
-    chrome.storage.sync.get(['serverUrl', 'secret', 'apiConfigData', 'lastUpdateTime'], function(items) {
+    chrome.storage.sync.get(['connectionMode', 'serverUrl', 'secret', 'apiConfigData', 'lastUpdateTime'], function(items) {
+      const mode = items.connectionMode || (items.serverUrl ? 'manual' : 'discover');
+      connectionModeInputs.forEach((input) => { input.checked = input.value === mode; });
+      updateConnectionMode();
       if (items.serverUrl) {
         serverUrlInput.value = items.serverUrl;
       }
@@ -142,41 +155,62 @@ document.addEventListener('DOMContentLoaded', function() {
   }
   
   // 保存设置函数
-  function saveSettings() {
+  async function saveSettings() {
+    const mode = connectionModeInputs.find((input) => input.checked).value;
     const serverUrl = serverUrlInput.value.trim();
     const secret = secretInput.value.trim();
-    
-    // 验证输入
-    if (!serverUrl) {
-      showStatus('请输入服务器URL', 'error');
-      return;
-    }
-    
     if (!secret) {
-      showStatus('请输入签名密钥', 'error');
+      showStatus('请输入口令', 'error');
       return;
     }
-    
-    // 验证URL格式
-    try {
-      new URL(serverUrl);
-    } catch (e) {
-      showStatus('服务器URL格式不正确', 'error');
-      return;
-    }
-    
-    // 保存设置
-    chrome.storage.sync.set(
-      {
-        serverUrl: serverUrl,
-        secret: secret
-      },
-      function() {
-        showStatus('设置已保存', 'success');
-        // 从接口获取配置信息并展示
-        fetchApiConfig(serverUrl, secret);
+    if (mode === 'manual') {
+      try {
+        new URL(serverUrl);
+      } catch (_) {
+        showStatus('服务器地址格式不正确', 'error');
+        return;
       }
-    );
+      await new Promise((resolve) => chrome.storage.sync.set({ connectionMode: mode, secret: secret, serverUrl: serverUrl }, resolve));
+      fetchApiConfig(serverUrl, secret);
+      return;
+    }
+    await new Promise((resolve) => chrome.storage.sync.set({ connectionMode: mode, secret: secret, serverUrl: '' }, resolve));
+    discoverAndLoad(secret, '');
+  }
+
+  function updateConnectionMode() {
+    const mode = connectionModeInputs.find((input) => input.checked).value;
+    const automatic = mode === 'discover';
+    serverUrlGroup.style.display = automatic ? 'none' : 'flex';
+    discoverHelp.style.display = automatic ? 'block' : 'none';
+    saveBtn.textContent = automatic ? '保存并查找手机' : '保存设置';
+    refreshBtn.textContent = automatic ? '重新探测' : '刷新配置';
+    refreshBtn.title = automatic ? '重新查找手机' : '刷新配置信息';
+  }
+
+  async function discoverAndLoad(secret, preferredUrl) {
+    try {
+      showStatus('正在局域网内查找手机...', 'info');
+      loadingDiv.style.display = 'block';
+      apiConfigTable.style.display = 'none';
+      const result = await new Promise((resolve) => {
+        chrome.runtime.sendMessage({
+          type: 'SMS_DISCOVER_SERVER',
+          secret: secret,
+          preferredUrl: preferredUrl
+        }, (response) => resolve(chrome.runtime.lastError ? null : response));
+      });
+      if (!result || !result.ok || !result.serverUrl) {
+        throw new Error('未找到口令匹配的手机');
+      }
+      await new Promise((resolve) => chrome.storage.sync.set({ connectionMode: 'discover', secret: secret, serverUrl: result.serverUrl }, resolve));
+      await fetchApiConfig(result.serverUrl, secret);
+    } catch (error) {
+      showStatus(`${error.message}。请确认手机和电脑在同一局域网，且主动控制服务端口为 5000。`, 'error');
+      displayApiConfig();
+    } finally {
+      loadingDiv.style.display = 'none';
+    }
   }
   
   // 从接口获取配置信息并显示

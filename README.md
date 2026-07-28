@@ -39,7 +39,7 @@ SmsForwarder Helper是一个Chrome浏览器插件，用于配合[SmsForwarder](h
 
 1. 点击Chrome工具栏中的插件图标
 2. 点击「设置」链接
-3. 填写SmsForwarder中配置的Webhook URL和签名密钥
+3. 选择固定地址或内网自动探测，并填写SmsForwarder中配置的主动控制服务口令
 4. 点击「保存设置」
 5. 点击「刷新」按钮获取最新API配置信息
 
@@ -90,7 +90,7 @@ SmsForwarder Helper是一个Chrome浏览器插件，用于配合[SmsForwarder](h
 
 - 请确保SmsForwarder应用已正确配置并运行
 - 短信功能依赖于SmsForwarder应用的正常运行
-- 使用前请先在设置页面配置服务器URL和签名密钥
+- 固定地址模式需填写服务器地址；内网自动探测模式只需填写口令，扩展会自动发现局域网内的手机
 - 如果遇到CORS（跨域资源共享）问题，请确保：
   1. 服务器端已配置正确的CORS响应头
   2. 插件的manifest.json中已添加对应域名的host_permissions

@@ -142,7 +142,7 @@ document.addEventListener('DOMContentLoaded', function() {
   SharedStorage.getSync(['serverUrl', 'secret', 'apiConfigData']).then((items) => {
     // 检查是否已配置
     if (!items.serverUrl || !items.secret) {
-      showStatus('请先配置SmsForwarder服务器设置', 'error');
+      showStatus('请先在设置中保存口令', 'error');
     }
     
     // 清空现有选项
@@ -246,7 +246,7 @@ document.addEventListener('DOMContentLoaded', function() {
       const items = await SharedStorage.getSync(['serverUrl', 'secret', 'simInfoList']);
       
       if (!items.serverUrl || !items.secret) {
-        showStatus('请先配置SmsForwarder服务器设置', 'error');
+          showStatus('请先在设置中保存口令', 'error');
         return;
       }
       
@@ -452,7 +452,7 @@ document.addEventListener('DOMContentLoaded', function() {
       const items = await SharedStorage.getSync(['serverUrl', 'secret']);
       
       if (!items.serverUrl || !items.secret) {
-        showStatus('请先配置SmsForwarder服务器设置', 'error');
+        showStatus('请先在设置中保存口令', 'error');
         isLoading = false;
         return;
       }
